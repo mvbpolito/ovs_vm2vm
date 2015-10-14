@@ -72,6 +72,8 @@
 #include "vlan-bitmap.h"
 #include "openvswitch/vlog.h"
 
+#include "netdev-provider.h" //Mauro
+
 VLOG_DEFINE_THIS_MODULE(ofproto_dpif);
 
 COVERAGE_DEFINE(ofproto_dpif_expired);
@@ -3983,6 +3985,154 @@ out:
     return rule;
 }
 
+struct found_rules_t{
+    struct ovs_list list_node;
+    struct rule * rule;
+    union flow_in_port in_port;
+    ofp_port_t out_port;
+};
+
+static union flow_in_port
+get_input_port(struct rule * rule)
+{
+    struct flow flow;
+    struct flow_wildcards wc;
+    
+    miniflow_expand(&rule->cr.match.flow, &flow);
+    minimask_expand(&rule->cr.match.mask, &wc);
+    
+    flow.in_port.odp_port &= wc.masks.in_port.odp_port;
+    flow.in_port.ofp_port &= wc.masks.in_port.ofp_port;
+            
+    return flow.in_port;
+}
+
+static bool 
+is_ofpact_output(struct ofpact * ofpact, ofp_port_t * port)
+{
+    if(ofpact->type != OFPACT_OUTPUT)
+        return false;
+        
+    if(port)
+        *port = ((struct ofpact_output *)ofpact)->port;
+        
+    return true;
+}
+
+static void
+look_for_direct_paths(struct ofproto_dpif * ofproto)
+{
+    struct ovs_list found_rules = OVS_LIST_INITIALIZER(&found_rules);
+    
+    /* 1st step: Found direct rules A→B */
+    
+    //Create a mask that takes care only of 'in_port'
+    //It appears that only ofp_port has to be set. (not 100% sure about it)
+    struct flow_wildcards wc;
+    memset(&wc.masks, 0, sizeof (wc.masks));
+    WC_MASK_FIELD(&wc, in_port.ofp_port);
+    
+    //it's faster to compare using minimask instead of using flow_wildcars->mask
+    struct minimask mask;
+    minimask_init(&mask, &wc);
+
+    struct rule * rule2;
+    HINDEX_FOR_EACH(rule2, cookie_node, &ofproto->up.cookies)
+    {
+        // I'm not sure about it. 
+        // Does netlink supports more than one table?
+        // Could be direct path that do not start at table0?
+        if(rule2->table_id != 0)
+            continue;
+
+        //does this flow takes care only of 'in_port'?
+        if(minimask_equal(&mask, &rule2->cr.match.mask))
+        {
+            struct rule_actions * rule_actions = (rule2->actions);
+            
+            if(rule_actions->ofpacts_len > 0)
+            {
+                if(is_ofpact_output(&rule_actions->ofpacts[0], NULL))
+                {
+                    struct found_rules_t * found_rule = malloc(sizeof(struct found_rules_t));
+                    found_rule->rule = rule2;
+                    found_rule->in_port = get_input_port(rule2);
+
+                    struct ofpact * ofpact = &rule_actions->ofpacts[0];
+                    found_rule->out_port = ((struct ofpact_output *)ofpact)->port;
+
+                    list_push_back(&found_rules, &found_rule->list_node);
+                }
+            }
+        }
+    }
+    
+    
+    /* 2nd and 3rd step */
+    struct found_rules_t * found_rule;
+    LIST_FOR_EACH(found_rule, list_node, &found_rules)
+    {
+        HINDEX_FOR_EACH(rule2, cookie_node, &ofproto->up.cookies)
+        {
+            if(found_rule->rule == rule2)
+                continue;
+            
+            /* 2nd step: remove rules were input_port is used in other rules */
+            //if(get_input_port(rule2).ofp_port == found_rules[i].in_port.ofp_port)
+            if(get_input_port(rule2).ofp_port == found_rule->in_port.ofp_port)
+            {
+                list_remove(found_rule);
+                continue;
+            }
+            
+            /* 3rd step: remove rules where output_port is used in other rules */
+            struct rule_actions * rule_actions;
+            rule_actions = rule2->actions;
+            
+            struct ofpact * ofpact;            
+            OFPACT_FOR_EACH(ofpact, rule_actions->ofpacts, rule_actions->ofpacts_len)
+            {                
+                ofp_port_t output_port;
+                bool is_output = is_ofpact_output(ofpact, &output_port);
+                if(is_output && output_port == found_rule->out_port)
+                {
+                    list_remove(found_rule);
+                    break;    //This rule is not more valid, ...
+                }
+            }
+        }
+    }
+
+    struct found_rules_t * found_rule2 = 0x0;
+    
+    LIST_FOR_EACH(found_rule, list_node, &found_rules)
+    {
+        found_rule2 = found_rule;
+        
+        LIST_FOR_EACH_CONTINUE(found_rule2, list_node, &found_rules)
+        {
+            if((found_rule->in_port.ofp_port == found_rule2->out_port) &&
+                (found_rule2->in_port.ofp_port == found_rule->out_port))
+                {
+                    VLOG_INFO("Direct path found: %d, %d, ", 
+                        found_rule->in_port.ofp_port, found_rule2->in_port.ofp_port);
+                        
+                    //struct ofport * ofport = ofproto_get_port(&ofproto->up, found_rule->in_port.ofp_port);
+                    //struct netdev_registered_class * net = netdev_lookup_class("dpdkrfake");
+                    //ofport->netdev->netdev_class = net->class;
+                    //if(net->class != ofport->netdev->netdev_class)
+                    //{
+                    //    VLOG_INFO("net->netdev_class != ofport->netdev->netdev_class");                        
+                    //}
+                }
+        }        
+    }
+    
+    /* memory leakage: When to remove the list */
+}
+
+
+
 static void
 complete_operation(struct rule_dpif *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -3990,6 +4140,8 @@ complete_operation(struct rule_dpif *rule)
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(rule->up.ofproto);
 
     ofproto->backer->need_revalidate = REV_FLOW_TABLE;
+    
+    look_for_direct_paths(ofproto);
 }
 
 static struct rule_dpif *rule_dpif_cast(const struct rule *rule)
