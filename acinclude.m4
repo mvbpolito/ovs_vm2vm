@@ -173,7 +173,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     DPDK_INCLUDE=$RTE_SDK/include
     DPDK_LIB_DIR=$RTE_SDK/lib
     DPDK_LIB="-ldpdk"
-    DPDK_EXTRA_LIB=""
+    DPDK_EXTRA_LIB="-ludev"
     RTE_SDK_FULL=`readlink -f $RTE_SDK`
 
     AC_COMPILE_IFELSE(
@@ -182,7 +182,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
 #error
 #endif], [])],
                     [], [AC_DEFINE([VHOST_CUSE], [1], [DPDK vhost-cuse support enabled, vhost-user disabled.])
-                         DPDK_EXTRA_LIB="-lfuse"])
+                         DPDK_EXTRA_LIB+="-lfuse"])
 
     ovs_save_CFLAGS="$CFLAGS"
     ovs_save_LDFLAGS="$LDFLAGS"
