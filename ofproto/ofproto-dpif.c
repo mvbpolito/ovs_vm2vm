@@ -3998,8 +3998,8 @@ get_input_port(struct rule * rule)
     struct flow flow;
     struct flow_wildcards wc;
     
-    miniflow_expand(&rule->cr.match.flow, &flow);
-    minimask_expand(&rule->cr.match.mask, &wc);
+    miniflow_expand(rule->cr.match.flow, &flow);
+    minimask_expand(rule->cr.match.mask, &wc);
     
     flow.in_port.odp_port &= wc.masks.in_port.odp_port;
     flow.in_port.ofp_port &= wc.masks.in_port.ofp_port;
@@ -4008,7 +4008,7 @@ get_input_port(struct rule * rule)
 }
 
 static bool 
-is_ofpact_output(struct ofpact * ofpact, ofp_port_t * port)
+is_ofpact_output(const struct ofpact * ofpact, ofp_port_t * port)
 {
     if(ofpact->type != OFPACT_OUTPUT)
         return false;
@@ -4023,7 +4023,7 @@ static void
 look_for_direct_paths(struct ofproto_dpif * ofproto)
 {
     struct ovs_list found_rules = OVS_LIST_INITIALIZER(&found_rules);
-    
+
     /* 1st step: Found direct rules A→B */
     
     //Create a mask that takes care only of 'in_port'
@@ -4034,6 +4034,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
     
     //it's faster to compare using minimask instead of using flow_wildcars->mask
     struct minimask mask;
+    miniflow_map_init(&mask.masks, &wc.masks);
     minimask_init(&mask, &wc);
 
     struct rule * rule2;
@@ -4043,12 +4044,14 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
         // Does netlink supports more than one table?
         // Could be direct path that do not start at table0?
         if(rule2->table_id != 0)
+        {
             continue;
+        }
 
         //does this flow takes care only of 'in_port'?
-        if(minimask_equal(&mask, &rule2->cr.match.mask))
+        if(minimask_equal(&mask, rule2->cr.match.mask))
         {
-            struct rule_actions * rule_actions = (rule2->actions);
+            const struct rule_actions * rule_actions = (rule2->actions);
             
             if(rule_actions->ofpacts_len > 0)
             {
@@ -4058,8 +4061,8 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                     found_rule->rule = rule2;
                     found_rule->in_port = get_input_port(rule2);
 
-                    struct ofpact * ofpact = &rule_actions->ofpacts[0];
-                    found_rule->out_port = ((struct ofpact_output *)ofpact)->port;
+                    const struct ofpact * ofpact = &rule_actions->ofpacts[0];
+                    found_rule->out_port = ((const struct ofpact_output *)ofpact)->port;
 
                     list_push_back(&found_rules, &found_rule->list_node);
                 }
@@ -4078,15 +4081,14 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                 continue;
             
             /* 2nd step: remove rules were input_port is used in other rules */
-            //if(get_input_port(rule2).ofp_port == found_rules[i].in_port.ofp_port)
             if(get_input_port(rule2).ofp_port == found_rule->in_port.ofp_port)
             {
-                list_remove(found_rule);
+                list_remove(&found_rule->list_node);
                 continue;
             }
             
             /* 3rd step: remove rules where output_port is used in other rules */
-            struct rule_actions * rule_actions;
+            const struct rule_actions * rule_actions;
             rule_actions = rule2->actions;
             
             struct ofpact * ofpact;            
@@ -4096,7 +4098,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                 bool is_output = is_ofpact_output(ofpact, &output_port);
                 if(is_output && output_port == found_rule->out_port)
                 {
-                    list_remove(found_rule);
+                    list_remove(&found_rule->list_node);
                     break;    //This rule is not more valid, ...
                 }
             }
@@ -4125,7 +4127,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                     //    VLOG_INFO("net->netdev_class != ofport->netdev->netdev_class");                        
                     //}
                 }
-        }        
+        }
     }
     
     /* memory leakage: When to remove the list */
