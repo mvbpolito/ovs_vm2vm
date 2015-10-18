@@ -4014,7 +4014,7 @@ is_ofpact_output(const struct ofpact * ofpact, ofp_port_t * port)
         return false;
         
     if(port)
-        *port = ((struct ofpact_output *)ofpact)->port;
+        *port = ofpact_get_OUTPUT(ofpact)->port;
         
     return true;
 }
@@ -4040,9 +4040,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
     struct rule * rule2;
     HINDEX_FOR_EACH(rule2, cookie_node, &ofproto->up.cookies)
     {
-        // I'm not sure about it. 
-        // Does netlink supports more than one table?
-        // Could be direct path that do not start at table0?
+        //Just support for table0
         if(rule2->table_id != 0)
         {
             continue;
@@ -4062,7 +4060,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                     found_rule->in_port = get_input_port(rule2);
 
                     const struct ofpact * ofpact = &rule_actions->ofpacts[0];
-                    found_rule->out_port = ((const struct ofpact_output *)ofpact)->port;
+                    found_rule->out_port = ofpact_get_OUTPUT(ofpact)->port;
 
                     list_push_back(&found_rules, &found_rule->list_node);
                 }
