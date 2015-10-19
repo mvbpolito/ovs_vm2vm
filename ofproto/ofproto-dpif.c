@@ -4118,6 +4118,10 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
                 {
                     VLOG_INFO("Direct path found: %d, %d, ", 
                         found_rule->in_port.ofp_port, found_rule2->in_port.ofp_port);
+
+                    /* I am sure that this completely breaks the architecture model */
+                    netdev_dpdk_create_direct_link(found_rule->in_port.ofp_port, 
+                        found_rule2->in_port.ofp_port);
                         
                     //struct ofport * ofport = ofproto_get_port(&ofproto->up, found_rule->in_port.ofp_port);
                     //struct netdev_registered_class * net = netdev_lookup_class("dpdkrfake");
@@ -4130,7 +4134,7 @@ look_for_direct_paths(struct ofproto_dpif * ofproto)
         }
     }
     
-    /* memory leakage: When to remove the list */
+    /* TODO: memory leakage: When to remove the list */
 }
 
 

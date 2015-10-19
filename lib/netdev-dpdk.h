@@ -27,6 +27,10 @@ void netdev_dpdk_register(void);
 void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
 
+int netdev_dpdk_create_direct_link(int a, int b);
+
+
+
 #else
 
 #define NON_PMD_CORE_ID UINT32_MAX

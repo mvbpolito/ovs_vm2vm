@@ -99,6 +99,8 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 #define NIC_PORT_RX_Q_SIZE 2048  /* Size of Physical NIC RX Queue, Max (n+32<=4096)*/
 #define NIC_PORT_TX_Q_SIZE 2048  /* Size of Physical NIC TX Queue, Max (n+32<=4096)*/
 
+#define DIRECT_LINK_NAME_FORMAT "ring_%d_%d"
+
 static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
 
@@ -189,6 +191,16 @@ struct dpdk_ring {
     struct rte_ring *cring_rx;
     int user_port_id; /* User given port no, parsed from port name */
     int eth_port_id; /* ethernet device port id */
+    struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
+};
+
+static struct ovs_list dpdk_direct_link_list OVS_GUARDED_BY(dpdk_mutex)
+    = OVS_LIST_INITIALIZER(&dpdk_direct_link_list);
+
+struct dpdk_direct_link {
+    int port_numbers[2];
+    struct rte_ring * rings[2];
+    struct dpdk_ring * dpdk_rings[2];
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
 };
 
@@ -2031,6 +2043,125 @@ unlock_dpdk:
     ovs_mutex_unlock(&dpdk_mutex);
     return err;
 }
+
+int netdev_dpdk_create_direct_link(int a, int b)
+{
+    struct dpdk_direct_link * direct_link;
+    struct rte_ring * ring_a_b, * ring_b_a;
+    struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
+    char ring_name[20];
+    char cmdline[PATH_MAX];
+    
+    ovs_mutex_lock(&dpdk_mutex);
+    
+    /* sanity check: is there another link that uses this ports? */
+    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+         if (direct_link->port_numbers[0] == a ||
+             direct_link->port_numbers[0] == b ||
+             direct_link->port_numbers[1] == a ||
+             direct_link->port_numbers[1] == b) {
+            VLOG_INFO("A direct link using this ports already exists!\n");
+            
+            goto error_unlock;
+         }
+    }
+    
+    /* sanity check: do exist this ports? */
+    struct dpdk_ring * ring;
+    LIST_FOR_EACH(ring, list_node, &dpdk_ring_list) {
+        if(ring->user_port_id == a)
+            dpdk_ring_a = ring;
+            
+        if(ring->user_port_id == b)
+            dpdk_ring_b = ring;
+            
+        if(dpdk_ring_a && dpdk_ring_b)
+            break;        
+    }
+    
+    if(dpdk_ring_a == NULL || dpdk_ring_b == NULL)
+    {
+        VLOG_ERR("Ports do not exist\n");
+        goto error_unlock;
+    }
+
+    /* Ports exist and are not used withing another direct link */
+    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
+
+    direct_link->port_numbers[0] = a;
+    direct_link->port_numbers[1] = b;
+    
+    direct_link->dpdk_rings[0] = dpdk_ring_a;
+    direct_link->dpdk_rings[1] = dpdk_ring_b;
+    
+    /* create ring a to b */
+    snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, a, b);
+    ring_a_b = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if(ring_a_b == NULL){
+        rte_free(direct_link);
+        return ENOMEM;
+    }
+    
+    direct_link->rings[0] = ring_a_b;
+        
+    /* create ring b to a */
+    snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, b, a);
+    ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if(ring_b_a == NULL){
+        rte_free(direct_link);
+        return ENOMEM;
+    }
+    
+    direct_link->rings[1] = ring_b_a;
+    
+    /* 
+     * rx and tx rings name convention is according to ovs, it means, the rx 
+     * ring would be the tx ting for the VM app
+     */
+    /* create ivshmem command lines */
+    VLOG_INFO("Apply the following commands in VM A\n");
+    /* 1: Remap rx (tx for the app) ring on a */
+    rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_rx, ring_a_b, cmdline, PATH_MAX);
+    VLOG_INFO(" 1) %s", cmdline);
+    
+    /* 2: Remap tx (rx for the app) ring on a */
+    rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_tx, ring_b_a, cmdline, PATH_MAX);
+    VLOG_INFO(" 2) %s", cmdline);
+    
+    VLOG_INFO("Apply the following commands in VM B\n");
+     /* 3: Remap rx (tx for the app) ring on b */
+    rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_rx, ring_b_a, cmdline, PATH_MAX);
+    VLOG_INFO(" 3) %s", cmdline);
+     
+     /* 4: Remap tx (rx for the app) ring on b */
+    rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_tx, ring_a_b, cmdline, PATH_MAX);
+    VLOG_INFO(" 4) %s", cmdline);
+    
+    list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
+    
+    /*
+     * TODO: 
+     * Unconnect dpdk_rings from the datapath (Do not receive more packets
+     * from that rings).
+     * Change netdev class implementation in order to read the statistics from
+     * other function
+     * delete dpdk_rings from dpdk_ring_list?
+     * Thing about locks, are additional locks required?
+     * Many more thing surely
+     */
+    
+    ovs_mutex_unlock(&dpdk_mutex);
+    return 0;
+
+free_direct_link:
+    rte_free(direct_link);
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    return -1;
+}
+
 
 #define NETDEV_DPDK_CLASS(NAME, INIT, CONSTRUCT, DESTRUCT, MULTIQ, SEND, \
     GET_CARRIER, GET_STATS, GET_FEATURES, GET_STATUS, RXQ_RECV)          \
