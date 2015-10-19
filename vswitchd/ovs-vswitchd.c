@@ -61,6 +61,11 @@ static unixctl_cb_func ovs_vswitchd_exit;
 static char *parse_options(int argc, char *argv[], char **unixctl_path);
 OVS_NO_RETURN static void usage(void);
 
+struct number {
+	struct ovs_list list_node;
+	int n;
+};
+
 int
 main(int argc, char *argv[])
 {
