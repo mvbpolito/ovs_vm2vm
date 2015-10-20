@@ -2044,6 +2044,12 @@ unlock_dpdk:
     return err;
 }
 
+/*
+ * creates a pair of links in order to be used in a direct path between two
+ * apps runnings inside a virtual machine
+ * There a limitation that the port numbers should be equal to the openflow
+ * numbers.
+ */
 int netdev_dpdk_create_direct_link(int a, int b)
 {
     struct dpdk_direct_link * direct_link;
@@ -2052,18 +2058,29 @@ int netdev_dpdk_create_direct_link(int a, int b)
     char ring_name[20];
     char cmdline[PATH_MAX];
     
+    ovs_assert(a != b);
+    
+    /* 
+     * it guarantees that a is always smaller than b, so always port_numers[0]
+     * will be the smallest one 
+     */
+    if(a > b)
+    {
+        int temp = a;
+        a = b;
+        b = temp;
+    }
+    
     ovs_mutex_lock(&dpdk_mutex);
     
     /* sanity check: is there another link that uses this ports? */
     LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-         if (direct_link->port_numbers[0] == a ||
-             direct_link->port_numbers[0] == b ||
-             direct_link->port_numbers[1] == a ||
-             direct_link->port_numbers[1] == b) {
-            VLOG_INFO("A direct link using this ports already exists!\n");
-            
+        if (direct_link->port_numbers[0] == a || 
+            direct_link->port_numbers[1] == b)
+        {
+            VLOG_INFO("A direct link using this ports already exists!\n"); 
             goto error_unlock;
-         }
+        }
     }
     
     /* sanity check: do exist this ports? */
@@ -2094,9 +2111,11 @@ int netdev_dpdk_create_direct_link(int a, int b)
     direct_link->dpdk_rings[0] = dpdk_ring_a;
     direct_link->dpdk_rings[1] = dpdk_ring_b;
     
-    /* create ring a to b */
+    /* lookup for ring a to b, if does not exist create it */
     snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, a, b);
-    ring_a_b = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+    ring_a_b = rte_ring_lookup(ring_name);
+    if(ring_a_b == NULL)
+        ring_a_b = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
                             RING_F_SP_ENQ | RING_F_SC_DEQ);
     if(ring_a_b == NULL){
         rte_free(direct_link);
@@ -2105,9 +2124,11 @@ int netdev_dpdk_create_direct_link(int a, int b)
     
     direct_link->rings[0] = ring_a_b;
         
-    /* create ring b to a */
+    /* lookup for ring b to a, if does not exist create it */
     snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, b, a);
-    ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+    ring_b_a = rte_ring_lookup(ring_name);
+    if(ring_b_a == NULL)
+        ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
                             RING_F_SP_ENQ | RING_F_SC_DEQ);
     if(ring_b_a == NULL){
         rte_free(direct_link);
@@ -2160,6 +2181,85 @@ free_direct_link:
 error_unlock:
     ovs_mutex_unlock(&dpdk_mutex);
     return -1;
+}
+
+/*
+ * delete a previous pair of direct links
+ * currently the rings are not actually deleted, they are just removed from
+ * the list
+ */
+int netdev_dpdk_delete_direct_link(int a, int b)
+{
+    struct dpdk_direct_link * direct_link;
+    /* original ports */
+    struct dpdk_ring * dpdk_ring_a;
+    struct dpdk_ring * dpdk_ring_b;
+    char cmdline[PATH_MAX];
+    
+    /* rings used in direct communication */
+    struct rte_ring * ring_a_b;
+    struct rte_ring * ring_b_a;
+    
+    bool found = false;
+    
+    ovs_assert(a != b);
+    
+    if(a > b)
+    {
+        int temp = a;
+        a = b;
+        b = temp;
+    }
+    
+    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+        if (direct_link->port_numbers[0] == a && 
+            direct_link->port_numbers[1] == b)
+        {
+            list_remove(&direct_link->list_node);
+            found = true;
+        }
+    }
+    
+    if(!found)
+        return -1; /* XXX: Better error code here */
+    
+    ring_a_b = direct_link->rings[0];
+    ring_b_a = direct_link->rings[1];
+    
+    dpdk_ring_a = direct_link->dpdk_rings[0];
+    dpdk_ring_b = direct_link->dpdk_rings[1];
+    
+    free(direct_link);
+    
+    /* this basically undo all the changes done in the creation */
+    
+    /* create ivshmem command lines */
+    VLOG_INFO("Apply the following commands in VM A\n");    
+    /* 1: Remap rx (tx for the app) ring on a */
+    rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_a->cring_rx, cmdline, PATH_MAX);
+    VLOG_INFO(" 1) %s", cmdline);
+    
+    /* 2: Remap tx (rx for the app) ring on a */
+    rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_a->cring_tx, cmdline, PATH_MAX);
+    VLOG_INFO(" 2) %s", cmdline);
+    
+    VLOG_INFO("Apply the following commands in VM B\n");
+     /* 3: Remap rx (tx for the app) ring on b */
+    rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_b->cring_rx, cmdline, PATH_MAX);
+    VLOG_INFO(" 3) %s", cmdline);
+     
+     /* 4: Remap tx (rx for the app) ring on b */
+    rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_b->cring_tx, cmdline, PATH_MAX);
+    VLOG_INFO(" 4) %s", cmdline);
+    
+    /*
+    * TODO: 
+    * - Return to original port implementation 
+    *   (point statistics counter to previous one)
+    * - Start pmd thread if necessary (it's hard)
+    * - Delete rings (when supported by dpdk)
+    */
+    return 0;
 }
 
 

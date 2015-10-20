@@ -1,4 +1,5 @@
 /*
+/*
  * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -4255,14 +4256,14 @@ direct_paths_update(struct ofproto_dpif * ofproto)
     }
     
 
-    /** debug **/
-    VLOG_INFO("Direct path list starts\n");
-    LIST_FOR_EACH(b_path_i, list_node, &direct_paths)
-    {
-		 VLOG_INFO("\tDirect path:  %d <-> %d\n", 
-                    b_path_i->port_1, b_path_i->port_2);
-	}
-	VLOG_INFO("Direct path list ends\n");
+    ///** debug **/
+    //VLOG_INFO("Direct path list starts\n");
+    //LIST_FOR_EACH(b_path_i, list_node, &direct_paths)
+    //{
+    //    VLOG_INFO("\tDirect path:  %d <-> %d\n", 
+    //                b_path_i->port_1, b_path_i->port_2);
+    //}
+    //VLOG_INFO("Direct path list ends\n");
     
 }
 
