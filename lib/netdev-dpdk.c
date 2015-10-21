@@ -1507,6 +1507,65 @@ netdev_dpdk_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
 }
 
 static int
+netdev_dpdk_direct_link_get_stats(const struct netdev *netdev,
+        struct netdev_stats *stats)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    struct ring_stats ring_stats_tx;
+    struct ring_stats ring_stats_rx;
+    struct dpdk_direct_link * direct_link;
+
+    int dpdk_ring_index = -1;
+
+    LIST_FOR_EACH(direct_link, list_node, &dpdk_direct_link_list)
+    {
+        if(direct_link->dpdk_rings[0].eth_port_id == dev->port_id)
+        {
+           dpdk_ring_index = 0;
+           break;
+       }
+
+        if(direct_link->dpdk_rings[1].eth_port_id == dev->port_id)
+        {
+            dpdk_ring_index = 1;
+            break;
+        }
+    }
+
+    if(dpdk_ring_index == -1)
+        return -1; /* XXX: better error return code here */
+
+    rte_ring_get_stats(direct_link->rings[dpdk_ring_index], &ring_stats_tx);
+    rte_ring_get_stats(direct_link->rings[1-dpdk_ring_index], &ring_stats_rx);
+
+    /* supported stats */
+    stats->tx_packets = ring_stats_tx.tx;
+    stats->rx_packets = ring_stats_rx.tx;
+    stats->tx_errors = ring_stats_tx.err;
+    stats->rx_errors = ring_stats_rx.err;
+    stats->tx_dropped = ring_stats_tx.err;
+    stats->rx_dropped = ring_stats_rx.err;
+
+    /* unsupported stats */
+    stats->rx_bytes = UINT64_MAX;
+    stats->tx_bytes = UINT64_MAX;
+    stats->multicast = UINT64_MAX;
+    stats->collisions = UINT64_MAX;
+    stats->rx_length_errors = UINT64_MAX;
+    stats->rx_over_errors = UINT64_MAX;
+    stats->rx_crc_errors = UINT64_MAX;
+    stats->rx_frame_errors = UINT64_MAX;
+    stats->rx_fifo_errors = UINT64_MAX;
+    stats->rx_missed_errors = UINT64_MAX;
+    stats->tx_aborted_errors = UINT64_MAX;
+    stats->tx_carrier_errors = UINT64_MAX;
+    stats->tx_fifo_errors = UINT64_MAX;
+    stats->tx_heartbeat_errors = UINT64_MAX;
+    stats->tx_window_errors = UINT64_MAX;
+    return 0;
+}
+
+static int
 netdev_dpdk_get_features(const struct netdev *netdev_,
                          enum netdev_features *current,
                          enum netdev_features *advertised OVS_UNUSED,
@@ -2057,12 +2116,12 @@ int netdev_dpdk_create_direct_link(int a, int b)
     struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
     char ring_name[20];
     char cmdline[PATH_MAX];
-    
+
     ovs_assert(a != b);
-    
-    /* 
+
+    /*
      * it guarantees that a is always smaller than b, so always port_numers[0]
-     * will be the smallest one 
+     * will be the smallest one
      */
     if(a > b)
     {
@@ -2070,32 +2129,32 @@ int netdev_dpdk_create_direct_link(int a, int b)
         a = b;
         b = temp;
     }
-    
+
     ovs_mutex_lock(&dpdk_mutex);
-    
+
     /* sanity check: is there another link that uses this ports? */
     LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-        if (direct_link->port_numbers[0] == a || 
+        if (direct_link->port_numbers[0] == a ||
             direct_link->port_numbers[1] == b)
         {
-            VLOG_INFO("A direct link using this ports already exists!\n"); 
+            VLOG_INFO("A direct link using this ports already exists!\n");
             goto error_unlock;
         }
     }
-    
+
     /* sanity check: do exist this ports? */
     struct dpdk_ring * ring;
     LIST_FOR_EACH(ring, list_node, &dpdk_ring_list) {
         if(ring->user_port_id == a)
             dpdk_ring_a = ring;
-            
+
         if(ring->user_port_id == b)
             dpdk_ring_b = ring;
-            
+
         if(dpdk_ring_a && dpdk_ring_b)
-            break;        
+            break;
     }
-    
+
     if(dpdk_ring_a == NULL || dpdk_ring_b == NULL)
     {
         VLOG_ERR("Ports do not exist\n");
@@ -2107,10 +2166,10 @@ int netdev_dpdk_create_direct_link(int a, int b)
 
     direct_link->port_numbers[0] = a;
     direct_link->port_numbers[1] = b;
-    
+
     direct_link->dpdk_rings[0] = dpdk_ring_a;
     direct_link->dpdk_rings[1] = dpdk_ring_b;
-    
+
     /* lookup for ring a to b, if does not exist create it */
     snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, a, b);
     ring_a_b = rte_ring_lookup(ring_name);
@@ -2121,9 +2180,9 @@ int netdev_dpdk_create_direct_link(int a, int b)
         rte_free(direct_link);
         return ENOMEM;
     }
-    
+
     direct_link->rings[0] = ring_a_b;
-        
+
     /* lookup for ring b to a, if does not exist create it */
     snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, b, a);
     ring_b_a = rte_ring_lookup(ring_name);
@@ -2134,11 +2193,11 @@ int netdev_dpdk_create_direct_link(int a, int b)
         rte_free(direct_link);
         return ENOMEM;
     }
-    
+
     direct_link->rings[1] = ring_b_a;
-    
-    /* 
-     * rx and tx rings name convention is according to ovs, it means, the rx 
+
+    /*
+     * rx and tx rings name convention is according to ovs, it means, the rx
      * ring would be the tx ting for the VM app
      */
     /* create ivshmem command lines */
@@ -2146,24 +2205,24 @@ int netdev_dpdk_create_direct_link(int a, int b)
     /* 1: Remap rx (tx for the app) ring on a */
     rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_rx, ring_a_b, cmdline, PATH_MAX);
     VLOG_INFO(" 1) %s", cmdline);
-    
+
     /* 2: Remap tx (rx for the app) ring on a */
     rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_tx, ring_b_a, cmdline, PATH_MAX);
     VLOG_INFO(" 2) %s", cmdline);
-    
+
     VLOG_INFO("Apply the following commands in VM B\n");
      /* 3: Remap rx (tx for the app) ring on b */
     rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_rx, ring_b_a, cmdline, PATH_MAX);
     VLOG_INFO(" 3) %s", cmdline);
-     
+
      /* 4: Remap tx (rx for the app) ring on b */
     rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_tx, ring_a_b, cmdline, PATH_MAX);
     VLOG_INFO(" 4) %s", cmdline);
-    
+
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
-    
+
     /*
-     * TODO: 
+     * TODO:
      * Unconnect dpdk_rings from the datapath (Do not receive more packets
      * from that rings).
      * Change netdev class implementation in order to read the statistics from
@@ -2172,7 +2231,7 @@ int netdev_dpdk_create_direct_link(int a, int b)
      * Thing about locks, are additional locks required?
      * Many more thing surely
      */
-    
+
     ovs_mutex_unlock(&dpdk_mutex);
     return 0;
 
@@ -2195,66 +2254,66 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     struct dpdk_ring * dpdk_ring_a;
     struct dpdk_ring * dpdk_ring_b;
     char cmdline[PATH_MAX];
-    
+
     /* rings used in direct communication */
     struct rte_ring * ring_a_b;
     struct rte_ring * ring_b_a;
-    
+
     bool found = false;
-    
+
     ovs_assert(a != b);
-    
+
     if(a > b)
     {
         int temp = a;
         a = b;
         b = temp;
     }
-    
+
     LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-        if (direct_link->port_numbers[0] == a && 
+        if (direct_link->port_numbers[0] == a &&
             direct_link->port_numbers[1] == b)
         {
             list_remove(&direct_link->list_node);
             found = true;
         }
     }
-    
+
     if(!found)
         return -1; /* XXX: Better error code here */
-    
+
     ring_a_b = direct_link->rings[0];
     ring_b_a = direct_link->rings[1];
-    
+
     dpdk_ring_a = direct_link->dpdk_rings[0];
     dpdk_ring_b = direct_link->dpdk_rings[1];
-    
+
     free(direct_link);
-    
+
     /* this basically undo all the changes done in the creation */
-    
+
     /* create ivshmem command lines */
-    VLOG_INFO("Apply the following commands in VM A\n");    
+    VLOG_INFO("Apply the following commands in VM A\n");
     /* 1: Remap rx (tx for the app) ring on a */
     rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_a->cring_rx, cmdline, PATH_MAX);
     VLOG_INFO(" 1) %s", cmdline);
-    
+
     /* 2: Remap tx (rx for the app) ring on a */
     rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_a->cring_tx, cmdline, PATH_MAX);
     VLOG_INFO(" 2) %s", cmdline);
-    
+
     VLOG_INFO("Apply the following commands in VM B\n");
      /* 3: Remap rx (tx for the app) ring on b */
     rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_b->cring_rx, cmdline, PATH_MAX);
     VLOG_INFO(" 3) %s", cmdline);
-     
+
      /* 4: Remap tx (rx for the app) ring on b */
     rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_b->cring_tx, cmdline, PATH_MAX);
     VLOG_INFO(" 4) %s", cmdline);
-    
+
     /*
-    * TODO: 
-    * - Return to original port implementation 
+    * TODO:
+    * - Return to original port implementation
     *   (point statistics counter to previous one)
     * - Start pmd thread if necessary (it's hard)
     * - Delete rings (when supported by dpdk)
