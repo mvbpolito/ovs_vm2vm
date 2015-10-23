@@ -23,6 +23,7 @@
 #include "openvswitch/types.h"
 #include "packets.h"
 #include "flow.h"
+#include "smap.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -306,6 +307,15 @@ int netdev_get_queue_stats(const struct netdev *, unsigned int queue_id,
                            struct netdev_queue_stats *);
 uint64_t netdev_get_change_seq(const struct netdev *);
 
+/* mauro: originally in netdev.c */
+struct netdev_registered_class {
+    /* In 'netdev_classes', by class->type. */
+    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
+    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
+    /* Number of 'struct netdev's of this class. */
+    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
+};
+
 struct netdev_queue_dump {
     struct netdev *netdev;
     int error;
@@ -340,6 +350,8 @@ int netdev_dump_queue_stats(const struct netdev *,
 
 enum { NETDEV_MAX_BURST = 32 }; /* Maximum number packets in a batch. */
 extern struct seq *tnl_conf_seq;
+
+struct netdev_registered_class * netdev_lookup_class(const char *type);
 
 #ifdef  __cplusplus
 }

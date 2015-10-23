@@ -1510,22 +1510,23 @@ static int
 netdev_dpdk_direct_link_get_stats(const struct netdev *netdev,
         struct netdev_stats *stats)
 {
+    //VLOG_INFO("netdev_dpdk_direct_link_get_stats()\n");
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
-    struct ring_stats ring_stats_tx;
-    struct ring_stats ring_stats_rx;
+    struct rte_ring_stats ring_stats_tx;
+    struct rte_ring_stats ring_stats_rx;
     struct dpdk_direct_link * direct_link;
 
     int dpdk_ring_index = -1;
 
     LIST_FOR_EACH(direct_link, list_node, &dpdk_direct_link_list)
     {
-        if(direct_link->dpdk_rings[0].eth_port_id == dev->port_id)
+        if(direct_link->dpdk_rings[0]->eth_port_id == dev->port_id)
         {
            dpdk_ring_index = 0;
            break;
        }
 
-        if(direct_link->dpdk_rings[1].eth_port_id == dev->port_id)
+        if(direct_link->dpdk_rings[1]->eth_port_id == dev->port_id)
         {
             dpdk_ring_index = 1;
             break;
@@ -2517,6 +2518,20 @@ static const struct netdev_class dpdk_ring_class =
         netdev_dpdk_get_status,
         netdev_dpdk_rxq_recv);
 
+static const struct netdev_class dpdk_direct_ring_class =
+    NETDEV_DPDK_CLASS(
+        "dpdkdirect",
+        NULL,
+        netdev_dpdk_ring_construct, /* NULL? */
+        netdev_dpdk_destruct,       /* NULL? */
+        netdev_dpdk_set_multiq,
+        NULL,       /* send */
+        netdev_dpdk_get_carrier,
+        netdev_dpdk_direct_link_get_stats,
+        netdev_dpdk_get_features,
+        netdev_dpdk_get_status,
+        NULL    /* rxq_recv */);
+
 static const struct netdev_class OVS_UNUSED dpdk_vhost_cuse_class =
     NETDEV_DPDK_CLASS(
         "dpdkvhostcuse",
@@ -2558,6 +2573,8 @@ netdev_dpdk_register(void)
         dpdk_common_init();
         netdev_register_provider(&dpdk_class);
         netdev_register_provider(&dpdk_ring_class);
+        netdev_register_provider(&dpdk_direct_ring_class);
+
 #ifdef VHOST_CUSE
         netdev_register_provider(&dpdk_vhost_cuse_class);
 #else

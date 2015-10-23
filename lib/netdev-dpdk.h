@@ -19,6 +19,7 @@ struct dp_packet;
 #include <rte_spinlock.h>
 #include <rte_launch.h>
 #include <rte_malloc.h>
+#include <rte_ring.h>
 
 #define NON_PMD_CORE_ID LCORE_ID_ANY
 
@@ -28,8 +29,7 @@ void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
 
 int netdev_dpdk_create_direct_link(int a, int b);
-
-
+int netdev_dpdk_delete_direct_link(int a, int b);
 
 #else
 

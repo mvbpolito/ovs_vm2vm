@@ -79,13 +79,13 @@ static struct ovs_mutex netdev_class_mutex OVS_ACQ_BEFORE(netdev_mutex);
 static struct hmap netdev_classes OVS_GUARDED_BY(netdev_class_mutex)
     = HMAP_INITIALIZER(&netdev_classes);
 
-struct netdev_registered_class {
-    /* In 'netdev_classes', by class->type. */
-    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
-    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
-    /* Number of 'struct netdev's of this class. */
-    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
-};
+//struct netdev_registered_class {
+//    /* In 'netdev_classes', by class->type. */
+//    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
+//    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
+//    /* Number of 'struct netdev's of this class. */
+//    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
+//};
 
 /* This is set pretty low because we probably won't learn anything from the
  * additional log messages. */
@@ -199,7 +199,7 @@ netdev_wait(void)
     ovs_mutex_unlock(&netdev_class_mutex);
 }
 
-static struct netdev_registered_class *
+/*static */ struct netdev_registered_class *
 netdev_lookup_class(const char *type)
     OVS_REQ_RDLOCK(netdev_class_mutex)
 {
@@ -651,6 +651,8 @@ netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers, int *cnt)
 {
     int retval;
 
+    if(rx->netdev->netdev_class->rxq_recv == NULL)
+        return 0;   /* MVB */
     retval = rx->netdev->netdev_class->rxq_recv(rx, buffers, cnt);
     if (!retval) {
         COVERAGE_INC(netdev_received);
@@ -663,7 +665,8 @@ netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers, int *cnt)
 void
 netdev_rxq_wait(struct netdev_rxq *rx)
 {
-    rx->netdev->netdev_class->rxq_wait(rx);
+    if(rx->netdev->netdev_class->rxq_wait != NULL)  /* MVB */
+        rx->netdev->netdev_class->rxq_wait(rx);
 }
 
 /* Discards any packets ready to be received on 'rx'. */
