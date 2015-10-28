@@ -4222,7 +4222,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             list_remove(&b_path_i->list_node);
 
             /* XXX: when to free(b_path_i) ? */
-#if 0
+
             /* remove ports from datapath */
             dpif_port_del(ofproto->backer->dpif, b_path_i->port_1);
             dpif_port_del(ofproto->backer->dpif, b_path_i->port_2);
@@ -4249,9 +4249,10 @@ direct_paths_update(struct ofproto_dpif * ofproto)
 
             /* deleted direct link */
             netdev_dpdk_delete_direct_link(b_path_i->port_1, b_path_i->port_2);
-#endif
         }
     }
+
+    void * opaque;
 
     /* look for inserted direct paths */
     LIST_FOR_EACH(b_path_i, list_node, &b_paths)
@@ -4266,7 +4267,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             list_push_back(&direct_paths, &t->list_node);
 
             /* create direct link */
-            netdev_dpdk_create_direct_link(b_path_i->port_1, b_path_i->port_2);
+            netdev_dpdk_create_direct_link(b_path_i->port_1, b_path_i->port_2, &opaque);
 
             /* remove ports from datapath*/
             dpif_port_del(ofproto->backer->dpif, b_path_i->port_1);
@@ -4297,6 +4298,11 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
+
+            /* TODO: Copy old packets to the new rings */
+
+            /* tell the application that rings are available to use */
+            netdev_dpdk_start_direct_link(opaque);
         }
     }
 

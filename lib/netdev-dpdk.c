@@ -2110,13 +2110,12 @@ unlock_dpdk:
  * There a limitation that the port numbers should be equal to the openflow
  * numbers.
  */
-int netdev_dpdk_create_direct_link(int a, int b)
+int netdev_dpdk_create_direct_link(int a, int b, void ** opaque)
 {
     struct dpdk_direct_link * direct_link;
     struct rte_ring * ring_a_b, * ring_b_a;
     struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
     char ring_name[20];
-    char cmdline[PATH_MAX];
 
     ovs_assert(a != b);
 
@@ -2200,38 +2199,42 @@ int netdev_dpdk_create_direct_link(int a, int b)
     /*
      * rx and tx rings name convention is according to ovs, it means, the rx
      * ring would be the tx ting for the VM app
-     */
-    /* create ivshmem command lines */
-    VLOG_INFO("Apply the following commands in VM A\n");
-    /* 1: Remap rx (tx for the app) ring on a */
-    rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_rx, ring_a_b, cmdline, PATH_MAX);
-    VLOG_INFO(" 1) %s", cmdline);
+    */
 
-    /* 2: Remap tx (rx for the app) ring on a */
-    rte_ivshmem_remap_metadata_create(dpdk_ring_a->cring_tx, ring_b_a, cmdline, PATH_MAX);
-    VLOG_INFO(" 2) %s", cmdline);
+    struct rte_ring * old[2];
+    struct rte_ring * new[2];
+    VLOG_INFO("Apply the following command in VM A\n");
+    /*1: Remap rx (tx for the app) ring on a */
+    old[0] = dpdk_ring_a->cring_rx;
+    new[0] = ring_a_b;
+
+    ///* 2: Remap tx (rx for the app) ring on a */
+    //old[1] = dpdk_ring_a->cring_tx;
+    //new[1] = ring_b_a;
+
+    remap_rings("vma", old, new, 1);
 
     VLOG_INFO("Apply the following commands in VM B\n");
-     /* 3: Remap rx (tx for the app) ring on b */
-    rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_rx, ring_b_a, cmdline, PATH_MAX);
-    VLOG_INFO(" 3) %s", cmdline);
+    /* 3: Remap rx (tx for the app) ring on b */
+    //old[0] = dpdk_ring_b->cring_rx;
+    //new[0] = ring_b_a;
 
-     /* 4: Remap tx (rx for the app) ring on b */
-    rte_ivshmem_remap_metadata_create(dpdk_ring_b->cring_tx, ring_a_b, cmdline, PATH_MAX);
-    VLOG_INFO(" 4) %s", cmdline);
+    /* 4: Remap tx (rx for the app) ring on b */
+    old[0] = dpdk_ring_b->cring_tx;
+    new[0] = ring_a_b;
+
+    remap_rings("vmb", old, new, 1);
 
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
 
     /*
      * TODO:
-     * Unconnect dpdk_rings from the datapath (Do not receive more packets
-     * from that rings).
-     * Change netdev class implementation in order to read the statistics from
-     * other function
-     * delete dpdk_rings from dpdk_ring_list?
-     * Thing about locks, are additional locks required?
+     * Think about locks, are additional locks required?
      * Many more thing surely
      */
+
+    if(opaque != NULL)
+        *opaque = direct_link;
 
     ovs_mutex_unlock(&dpdk_mutex);
     return 0;
@@ -2244,17 +2247,60 @@ error_unlock:
 }
 
 /*
+ * removes usable lock in the rings, then the application can start using
+ * them
+ */
+void netdev_dpdk_start_direct_link(void * opaque)
+{
+    struct dpdk_direct_link * direct_link;
+    struct rte_ring * r;
+
+
+    VLOG_INFO("Starting direct link\n");
+
+    direct_link = (struct direct_link *) opaque;
+
+    if(direct_link == NULL)
+        return;
+
+    r = direct_link->rings[0];
+    rte_spinlock_unlock(&r->usable);
+
+    r = direct_link->rings[1];
+    rte_spinlock_unlock(&r->usable);
+
+    //r = direct_link->dpdk_rings[0]->cring_rx;
+    //rte_spinlock_unlock(&r->usable);
+    //
+    //r = direct_link->dpdk_rings[0]->cring_tx;
+    //rte_spinlock_unlock(&r->usable);
+    //
+    //r = direct_link->dpdk_rings[1]->cring_rx;
+    //rte_spinlock_unlock(&r->usable);
+    //
+    //r = direct_link->dpdk_rings[1]->cring_tx;
+    //rte_spinlock_unlock(&r->usable);
+
+    VLOG_INFO("Direct link started\n");
+}
+
+/*
  * delete a previous pair of direct links
  * currently the rings are not actually deleted, they are just removed from
- * the list
+ * the list (dpdk does not yet support removing rings)
  */
 int netdev_dpdk_delete_direct_link(int a, int b)
 {
+    VLOG_INFO("Deleting direct_link\n");
+
     struct dpdk_direct_link * direct_link;
     /* original ports */
     struct dpdk_ring * dpdk_ring_a;
     struct dpdk_ring * dpdk_ring_b;
     char cmdline[PATH_MAX];
+
+    struct rte_ring * old[2];
+    struct rte_ring * new[2];
 
     /* rings used in direct communication */
     struct rte_ring * ring_a_b;
@@ -2277,11 +2323,15 @@ int netdev_dpdk_delete_direct_link(int a, int b)
         {
             list_remove(&direct_link->list_node);
             found = true;
+            break;
         }
     }
 
     if(!found)
+    {
+        VLOG_INFO("Direct link %d <-> %d not found\n", a, b);
         return -1; /* XXX: Better error code here */
+    }
 
     ring_a_b = direct_link->rings[0];
     ring_b_a = direct_link->rings[1];
@@ -2289,34 +2339,39 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     dpdk_ring_a = direct_link->dpdk_rings[0];
     dpdk_ring_b = direct_link->dpdk_rings[1];
 
-    free(direct_link);
+    //free(direct_link);
 
     /* this basically undo all the changes done in the creation */
 
-    /* create ivshmem command lines */
     VLOG_INFO("Apply the following commands in VM A\n");
     /* 1: Remap rx (tx for the app) ring on a */
-    rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_a->cring_rx, cmdline, PATH_MAX);
-    VLOG_INFO(" 1) %s", cmdline);
+    old[0] = ring_a_b;
+    new[0] = dpdk_ring_a->cring_rx;
 
-    /* 2: Remap tx (rx for the app) ring on a */
-    rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_a->cring_tx, cmdline, PATH_MAX);
-    VLOG_INFO(" 2) %s", cmdline);
+    ///* 2: Remap tx (rx for the app) ring on a */
+    //old[1] = ring_b_a;
+    //new[1] = dpdk_ring_a->cring_tx;
+
+    remap_rings("vma_old", new, old, 1);
 
     VLOG_INFO("Apply the following commands in VM B\n");
-     /* 3: Remap rx (tx for the app) ring on b */
-    rte_ivshmem_remap_metadata_create(ring_b_a, dpdk_ring_b->cring_rx, cmdline, PATH_MAX);
-    VLOG_INFO(" 3) %s", cmdline);
+    ///* 3: Remap rx (tx for the app) ring on b */
+    //old[0] = ring_b_a;
+    //new[0] = dpdk_ring_b->cring_rx;
 
-     /* 4: Remap tx (rx for the app) ring on b */
-    rte_ivshmem_remap_metadata_create(ring_a_b, dpdk_ring_b->cring_tx, cmdline, PATH_MAX);
-    VLOG_INFO(" 4) %s", cmdline);
+    /* 4: Remap tx (rx for the app) ring on b */
+    old[0] = ring_a_b;
+    new[0] = dpdk_ring_b->cring_tx;
+    remap_rings("vmb_old", new, old, 1);
+
+    /* all the rings can be used */
+    rte_spinlock_unlock(&dpdk_ring_a->cring_rx->usable);
+    rte_spinlock_unlock(&dpdk_ring_a->cring_tx->usable);
+    rte_spinlock_unlock(&dpdk_ring_b->cring_rx->usable);
+    rte_spinlock_unlock(&dpdk_ring_b->cring_tx->usable);
 
     /*
     * TODO:
-    * - Return to original port implementation
-    *   (point statistics counter to previous one)
-    * - Start pmd thread if necessary (it's hard)
     * - Delete rings (when supported by dpdk)
     */
     return 0;
