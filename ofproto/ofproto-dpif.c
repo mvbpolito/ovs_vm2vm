@@ -4193,8 +4193,8 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                 direct->port_2 = path_j->in_port;
                 list_push_back(&b_paths, &direct->list_node);
 
-                VLOG_INFO("Direct path %d <-> %d found\n",
-                    path_i->in_port, path_j->in_port);
+                /*VLOG_INFO("Direct path %d <-> %d found\n",
+                    path_i->in_port, path_j->in_port);*/
             }
         }
     }
@@ -4224,8 +4224,13 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             /* XXX: when to free(b_path_i) ? */
 
             /* remove ports from datapath */
-            dpif_port_del(ofproto->backer->dpif, b_path_i->port_1);
-            dpif_port_del(ofproto->backer->dpif, b_path_i->port_2);
+            odp_port_t odp_port1 = ofp_port_to_odp_port(ofproto, b_path_i->port_1);
+            VLOG_INFO("Deleting port %d\n", odp_port1);
+            dpif_port_del(ofproto->backer->dpif, odp_port1);
+
+            odp_port_t odp_port2 = ofp_port_to_odp_port(ofproto, b_path_i->port_2);
+            VLOG_INFO("Deleting port %d\n", odp_port2);
+            dpif_port_del(ofproto->backer->dpif, odp_port2);
 
              /* change netdev implementation */
             struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
@@ -4242,7 +4247,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &port_1);
             dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &port_2);
 
-            if((port_1 != b_path_i->port_1) || (port_2 != b_path_i->port_2))
+            if((port_1 != odp_port1) || (port_2 != odp_port2))
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
@@ -4266,35 +4271,47 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             memcpy(t, (b_path_i), sizeof(*t));
             list_push_back(&direct_paths, &t->list_node);
 
-            /* create direct link */
-            netdev_dpdk_create_direct_link(b_path_i->port_1, b_path_i->port_2, &opaque);
+            odp_port_t odp_port1, odp_port2;
+            ofp_port_t ofp_port1, ofp_port2;
 
-            /* remove ports from datapath*/
-            dpif_port_del(ofproto->backer->dpif, b_path_i->port_1);
-            dpif_port_del(ofproto->backer->dpif, b_path_i->port_2);
+            ofp_port1 = b_path_i->port_1;
+            odp_port1 = ofp_port_to_odp_port(ofproto, b_path_i->port_1);
+
+            ofp_port2 = b_path_i->port_2;
+            odp_port2 = ofp_port_to_odp_port(ofproto, b_path_i->port_2);
+
+            /* create direct link */
+            netdev_dpdk_create_direct_link(ofp_port1, ofp_port2, &opaque);
+
+            /* remove ports from datapath */
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
+            dpif_port_del(ofproto->backer->dpif, odp_port1);
+
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
+            dpif_port_del(ofproto->backer->dpif, odp_port2);
 
             /* change netdev implementation */
             struct netdev_registered_class * net = netdev_lookup_class("dpdkdirect");
             struct ofport * ofport_1;
-            ofport_1 = ofproto_get_port(&ofproto->up, b_path_i->port_1);
+            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
             ofport_1->netdev->n_rxq = 0;
             ofport_1->netdev->n_txq = 0;
             ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
 
             struct ofport * ofport_2;
-            ofport_2 = ofproto_get_port(&ofproto->up, b_path_i->port_2);
+            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
             ofport_2->netdev->n_rxq = 0;
             ofport_2->netdev->n_txq = 0;
             ofport_2->netdev->netdev_class = net->class;  /* this too */
 
             /* add "new" ports to the datapath */
-            odp_port_t port_1 = b_path_i->port_1;
-            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &port_1);
+            odp_port_t odp_port1_ = odp_port1;
+            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
 
-            odp_port_t port_2 = b_path_i->port_2;
-            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &port_2);
+            odp_port_t odp_port2_ = odp_port2;
+            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
 
-            if((port_1 != b_path_i->port_1) || (port_2 != b_path_i->port_2))
+            if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }

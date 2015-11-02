@@ -101,6 +101,14 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 
 #define DIRECT_LINK_NAME_FORMAT "ring_%d_%d"
 
+#define UNIVERSAL_NODE_ADDRESS "127.0.0.1"
+#define UNIVERSAL_NODE_PORT     8080
+#define UNIVERSAL_NODE_BASE_URL "/direct_vm2vm/direct_vm2vm/"
+#define UNIVERSAL_NODE_JSON_FORMAT  "{ \n"                  \
+                                    "\"port\":\"%s\",\n"     \
+                                    "\"command\":\"%s\"\n"    \
+                                    "}"
+
 static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
 
@@ -2105,30 +2113,106 @@ unlock_dpdk:
 }
 
 /*
+ * it is responsible for executing the cmdline in qemu, this particular
+ * implementation send the cmdline to the universal node using a JSON
+ * data format to a http server
+ *
+ * XXX: Optimize string operations. Better, use a library!
+ */
+static void
+remap_execute(char * cmdline, void * args)
+{
+    char * port = args;
+
+    char buf[4096] = {0};   /* quite big due to the overhead of http and json */
+    char tmp[1024] = {0};
+    char * buf_ptr;
+
+    /* socket related stuff*/
+    int sd;
+    struct sockaddr_in serv_addr;
+    int n;
+
+    snprintf(tmp, 1024, "PUT %s HTTP/1.1\r\n", UNIVERSAL_NODE_BASE_URL);
+    strncat(buf, tmp, 1024);
+
+    snprintf(tmp, 1024, "Host: %s:%hu\r\n", UNIVERSAL_NODE_ADDRESS, UNIVERSAL_NODE_PORT);
+    strncat(buf, tmp, 1024);
+
+    strcat(buf, "Connection: close\r\n");
+    strcat(buf, "Accept: */*\r\n\r\n");
+
+    snprintf(tmp, 1024, UNIVERSAL_NODE_JSON_FORMAT, port, cmdline);
+    strncat(buf, tmp, 1024);
+
+    sd = socket(AF_INET, SOCK_STREAM, 0);
+    if(sd < 0)
+    {
+        VLOG_ERR("Error creating socket\n");
+        return;
+    }
+
+    memset((void *)&serv_addr, sizeof(serv_addr), 0x00);
+    serv_addr.sin_family = AF_INET;
+
+    if(inet_pton(AF_INET, UNIVERSAL_NODE_ADDRESS, &serv_addr.sin_addr) <= 0)
+    {
+        VLOG_ERR("Error converting UniversalNode Address\n");
+        return;
+    }
+
+    serv_addr.sin_port = htons(UNIVERSAL_NODE_PORT);
+
+    if(connect(sd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
+    {
+        VLOG_ERR("Error connecting to UniversalNode\n");
+        return;
+    }
+
+    n = strlen(buf);
+    buf_ptr = &buf[0];
+    do
+    {
+        int ret = write(sd, buf_ptr, n);
+        if(ret < 0)
+        {
+            VLOG_ERR("Error sending data over socket to UniversalNode\n");
+            return;
+        }
+
+        n -= ret;
+        buf_ptr += ret;
+    }while(n > 0);
+
+    close(sd);
+}
+
+/*
  * creates a pair of links in order to be used in a direct path between two
  * apps runnings inside a virtual machine
  * There a limitation that the port numbers should be equal to the openflow
  * numbers.
  */
-int netdev_dpdk_create_direct_link(int a, int b, void ** opaque)
+int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
 {
+    VLOG_INFO("Creating direct link %d <-> %d\n", a_, b_);
+
     struct dpdk_direct_link * direct_link;
     struct rte_ring * ring_a_b, * ring_b_a;
     struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
+
+    /* ports that are directly connected */
+    int a = MIN(a_, b_);
+    int b = MAX(a_, b_);
+
+    /* arrays use to remmap rings */
+    struct rte_ring * old[2];
+    struct rte_ring * new[2];
+
     char ring_name[20];
+    char port_name[20];
 
     ovs_assert(a != b);
-
-    /*
-     * it guarantees that a is always smaller than b, so always port_numers[0]
-     * will be the smallest one
-     */
-    if(a > b)
-    {
-        int temp = a;
-        a = b;
-        b = temp;
-    }
 
     ovs_mutex_lock(&dpdk_mutex);
 
@@ -2201,9 +2285,9 @@ int netdev_dpdk_create_direct_link(int a, int b, void ** opaque)
      * ring would be the tx ting for the VM app
     */
 
-    struct rte_ring * old[2];
-    struct rte_ring * new[2];
-    VLOG_INFO("Apply the following command in VM A\n");
+    //VLOG_INFO("Apply the following command in VM A\n");
+
+    snprintf(port_name, 20, "dpdkr%d", a);
     /*1: Remap rx (tx for the app) ring on a */
     old[0] = dpdk_ring_a->cring_rx;
     new[0] = ring_a_b;
@@ -2212,9 +2296,11 @@ int netdev_dpdk_create_direct_link(int a, int b, void ** opaque)
     //old[1] = dpdk_ring_a->cring_tx;
     //new[1] = ring_b_a;
 
-    remap_rings("vma", old, new, 1);
+    /* XXX: vma is not ok, a dynamic name should be used */
+    remap_rings("vma", old, new, 1, remap_execute, (void *) port_name);
 
-    VLOG_INFO("Apply the following commands in VM B\n");
+    //VLOG_INFO("Apply the following commands in VM B\n");
+    snprintf(port_name, 20, "dpdkr%d", b);
     /* 3: Remap rx (tx for the app) ring on b */
     //old[0] = dpdk_ring_b->cring_rx;
     //new[0] = ring_b_a;
@@ -2223,7 +2309,8 @@ int netdev_dpdk_create_direct_link(int a, int b, void ** opaque)
     old[0] = dpdk_ring_b->cring_tx;
     new[0] = ring_a_b;
 
-    remap_rings("vmb", old, new, 1);
+    /* XXX: same name issue here */
+    remap_rings("vmb", old, new, 1, remap_execute, (void *) port_name);
 
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
 
@@ -2254,7 +2341,6 @@ void netdev_dpdk_start_direct_link(void * opaque)
 {
     struct dpdk_direct_link * direct_link;
     struct rte_ring * r;
-
 
     VLOG_INFO("Starting direct link\n");
 
@@ -2289,7 +2375,7 @@ void netdev_dpdk_start_direct_link(void * opaque)
  * currently the rings are not actually deleted, they are just removed from
  * the list (dpdk does not yet support removing rings)
  */
-int netdev_dpdk_delete_direct_link(int a, int b)
+int netdev_dpdk_delete_direct_link(int a_, int b_)
 {
     VLOG_INFO("Deleting direct_link\n");
 
@@ -2298,6 +2384,7 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     struct dpdk_ring * dpdk_ring_a;
     struct dpdk_ring * dpdk_ring_b;
     char cmdline[PATH_MAX];
+    char port_name[20];
 
     struct rte_ring * old[2];
     struct rte_ring * new[2];
@@ -2306,16 +2393,13 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     struct rte_ring * ring_a_b;
     struct rte_ring * ring_b_a;
 
-    bool found = false;
+    /* ports that are directly connected */
+    int a = MIN(a_, b_);
+    int b = MAX(a_, b_);
 
     ovs_assert(a != b);
 
-    if(a > b)
-    {
-        int temp = a;
-        a = b;
-        b = temp;
-    }
+    bool found = false;
 
     LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
         if (direct_link->port_numbers[0] == a &&
@@ -2339,11 +2423,14 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     dpdk_ring_a = direct_link->dpdk_rings[0];
     dpdk_ring_b = direct_link->dpdk_rings[1];
 
+    /* XXX: ovs used to crash here.. */
     //free(direct_link);
 
     /* this basically undo all the changes done in the creation */
 
-    VLOG_INFO("Apply the following commands in VM A\n");
+    //VLOG_INFO("Apply the following commands in VM A\n");
+    snprintf(port_name, 20, "dpdkr%d", a);
+
     /* 1: Remap rx (tx for the app) ring on a */
     old[0] = ring_a_b;
     new[0] = dpdk_ring_a->cring_rx;
@@ -2352,9 +2439,10 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     //old[1] = ring_b_a;
     //new[1] = dpdk_ring_a->cring_tx;
 
-    remap_rings("vma_old", new, old, 1);
+    remap_rings("vma_old", new, old, 1, remap_execute, (void *) port_name);
 
-    VLOG_INFO("Apply the following commands in VM B\n");
+    //VLOG_INFO("Apply the following commands in VM B\n");
+    snprintf(port_name, 20, "dpdkr%d", b);
     ///* 3: Remap rx (tx for the app) ring on b */
     //old[0] = ring_b_a;
     //new[0] = dpdk_ring_b->cring_rx;
@@ -2362,8 +2450,9 @@ int netdev_dpdk_delete_direct_link(int a, int b)
     /* 4: Remap tx (rx for the app) ring on b */
     old[0] = ring_a_b;
     new[0] = dpdk_ring_b->cring_tx;
-    remap_rings("vmb_old", new, old, 1);
+    remap_rings("vmb_old", new, old, 1, remap_execute, (void *) port_name);
 
+    /* XXX: is it really necessary? */
     /* all the rings can be used */
     rte_spinlock_unlock(&dpdk_ring_a->cring_rx->usable);
     rte_spinlock_unlock(&dpdk_ring_a->cring_tx->usable);
