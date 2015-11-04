@@ -2296,8 +2296,7 @@ int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
     //old[1] = dpdk_ring_a->cring_tx;
     //new[1] = ring_b_a;
 
-    /* XXX: vma is not ok, a dynamic name should be used */
-    remap_rings("vma", old, new, 1, remap_execute, (void *) port_name);
+    remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
     //VLOG_INFO("Apply the following commands in VM B\n");
     snprintf(port_name, 20, "dpdkr%d", b);
@@ -2309,8 +2308,7 @@ int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
     old[0] = dpdk_ring_b->cring_tx;
     new[0] = ring_a_b;
 
-    /* XXX: same name issue here */
-    remap_rings("vmb", old, new, 1, remap_execute, (void *) port_name);
+    remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
 
@@ -2439,7 +2437,7 @@ int netdev_dpdk_delete_direct_link(int a_, int b_)
     //old[1] = ring_b_a;
     //new[1] = dpdk_ring_a->cring_tx;
 
-    remap_rings("vma_old", new, old, 1, remap_execute, (void *) port_name);
+    remap_rings(new, old, 1, remap_execute, (void *) port_name);
 
     //VLOG_INFO("Apply the following commands in VM B\n");
     snprintf(port_name, 20, "dpdkr%d", b);
@@ -2450,7 +2448,7 @@ int netdev_dpdk_delete_direct_link(int a_, int b_)
     /* 4: Remap tx (rx for the app) ring on b */
     old[0] = ring_a_b;
     new[0] = dpdk_ring_b->cring_tx;
-    remap_rings("vmb_old", new, old, 1, remap_execute, (void *) port_name);
+    remap_rings(new, old, 1, remap_execute, (void *) port_name);
 
     /* XXX: is it really necessary? */
     /* all the rings can be used */
