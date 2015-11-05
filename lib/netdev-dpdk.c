@@ -2128,6 +2128,8 @@ remap_execute(char * cmdline, void * args)
     char tmp[1024] = {0};
     char * buf_ptr;
 
+    VLOG_INFO("Requesting UniversalNode to remap: %s\n", port);
+
     /* socket related stuff*/
     int sd;
     struct sockaddr_in serv_addr;
@@ -2192,6 +2194,7 @@ remap_execute(char * cmdline, void * args)
  * apps runnings inside a virtual machine
  * There a limitation that the port numbers should be equal to the openflow
  * numbers.
+ * XXX: is this limination still true?
  */
 int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
 {
