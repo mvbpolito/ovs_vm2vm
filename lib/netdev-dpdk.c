@@ -103,7 +103,7 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 
 #define UNIVERSAL_NODE_ADDRESS "127.0.0.1"
 #define UNIVERSAL_NODE_PORT     8080
-#define UNIVERSAL_NODE_BASE_URL "/direct_vm2vm/direct_vm2vm/"
+#define UNIVERSAL_NODE_BASE_URL "/direct_vm2vm/"
 #define UNIVERSAL_NODE_JSON_FORMAT  "{ \n"                  \
                                     "\"port\":\"%s\",\n"     \
                                     "\"command\":\"%s\"\n"    \
@@ -2126,14 +2126,17 @@ remap_execute(char * cmdline, void * args)
 
     char buf[4096] = {0};   /* quite big due to the overhead of http and json */
     char tmp[1024] = {0};
+    char json[1024] = {0};
     char * buf_ptr;
-
     VLOG_INFO("Requesting UniversalNode to remap: %s\n", port);
 
     /* socket related stuff*/
     int sd;
     struct sockaddr_in serv_addr;
     int n;
+
+    /* create json first to have its len */
+    snprintf(json, 1024, UNIVERSAL_NODE_JSON_FORMAT, port, cmdline);
 
     snprintf(tmp, 1024, "PUT %s HTTP/1.1\r\n", UNIVERSAL_NODE_BASE_URL);
     strncat(buf, tmp, 1024);
@@ -2142,10 +2145,15 @@ remap_execute(char * cmdline, void * args)
     strncat(buf, tmp, 1024);
 
     strcat(buf, "Connection: close\r\n");
-    strcat(buf, "Accept: */*\r\n\r\n");
+    strcat(buf, "Accept: */*\r\n");
 
-    snprintf(tmp, 1024, UNIVERSAL_NODE_JSON_FORMAT, port, cmdline);
+    snprintf(tmp, 1024, "Content-Length: %d\r\n", strlen(json));
     strncat(buf, tmp, 1024);
+
+    strcat(buf, "Content-Type: application/json\r\n\r\n");
+
+    strncat(buf, json, 1024);
+
 
     sd = socket(AF_INET, SOCK_STREAM, 0);
     if(sd < 0)
@@ -2288,30 +2296,27 @@ int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
      * ring would be the tx ting for the VM app
     */
 
-    //VLOG_INFO("Apply the following command in VM A\n");
-
     snprintf(port_name, 20, "dpdkr%d", a);
     /*1: Remap rx (tx for the app) ring on a */
     old[0] = dpdk_ring_a->cring_rx;
     new[0] = ring_a_b;
 
-    ///* 2: Remap tx (rx for the app) ring on a */
-    //old[1] = dpdk_ring_a->cring_tx;
-    //new[1] = ring_b_a;
+    /* 2: Remap tx (rx for the app) ring on a */
+    old[1] = dpdk_ring_a->cring_tx;
+    new[1] = ring_b_a;
 
-    remap_rings(old, new, 1, remap_execute, (void *) port_name);
+    remap_rings(old, new, 2, remap_execute, (void *) port_name);
 
-    //VLOG_INFO("Apply the following commands in VM B\n");
     snprintf(port_name, 20, "dpdkr%d", b);
     /* 3: Remap rx (tx for the app) ring on b */
-    //old[0] = dpdk_ring_b->cring_rx;
-    //new[0] = ring_b_a;
+    old[0] = dpdk_ring_b->cring_rx;
+    new[0] = ring_b_a;
 
     /* 4: Remap tx (rx for the app) ring on b */
-    old[0] = dpdk_ring_b->cring_tx;
-    new[0] = ring_a_b;
+    old[1] = dpdk_ring_b->cring_tx;
+    new[1] = ring_a_b;
 
-    remap_rings(old, new, 1, remap_execute, (void *) port_name);
+    remap_rings(old, new, 2, remap_execute, (void *) port_name);
 
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
 
@@ -2429,29 +2434,27 @@ int netdev_dpdk_delete_direct_link(int a_, int b_)
 
     /* this basically undo all the changes done in the creation */
 
-    //VLOG_INFO("Apply the following commands in VM A\n");
     snprintf(port_name, 20, "dpdkr%d", a);
 
     /* 1: Remap rx (tx for the app) ring on a */
-    old[0] = ring_a_b;
+    old[0] = dpdk_ring_a->cring_rx;	/* this is rare but old means original ring*/
     new[0] = dpdk_ring_a->cring_rx;
 
-    ///* 2: Remap tx (rx for the app) ring on a */
-    //old[1] = ring_b_a;
-    //new[1] = dpdk_ring_a->cring_tx;
+    /* 2: Remap tx (rx for the app) ring on a */
+    old[1] = dpdk_ring_a->cring_tx;
+    new[1] = dpdk_ring_a->cring_tx;
 
-    remap_rings(new, old, 1, remap_execute, (void *) port_name);
+    remap_rings(new, old, 2, remap_execute, (void *) port_name);
 
-    //VLOG_INFO("Apply the following commands in VM B\n");
     snprintf(port_name, 20, "dpdkr%d", b);
-    ///* 3: Remap rx (tx for the app) ring on b */
-    //old[0] = ring_b_a;
-    //new[0] = dpdk_ring_b->cring_rx;
+    /* 3: Remap rx (tx for the app) ring on b */
+    old[0] = dpdk_ring_b->cring_rx;
+    new[0] = dpdk_ring_b->cring_rx;
 
     /* 4: Remap tx (rx for the app) ring on b */
-    old[0] = ring_a_b;
-    new[0] = dpdk_ring_b->cring_tx;
-    remap_rings(new, old, 1, remap_execute, (void *) port_name);
+    old[1] = dpdk_ring_b->cring_tx; /* this is rare but old means original ring*/
+    new[1] = dpdk_ring_b->cring_tx;
+    remap_rings(new, old, 2, remap_execute, (void *) port_name);
 
     /* XXX: is it really necessary? */
     /* all the rings can be used */

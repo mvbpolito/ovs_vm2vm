@@ -4212,7 +4212,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
 
     struct b_path * b_path_i;
 
-    //* look for deleted direct paths */
+    /*** look for deleted direct paths ***/
     LIST_FOR_EACH(b_path_i, list_node, &direct_paths)
     {
         if(!list_contains_b_path(&b_paths, b_path_i))
@@ -4223,43 +4223,59 @@ direct_paths_update(struct ofproto_dpif * ofproto)
 
             /* XXX: when to free(b_path_i) ? */
 
+            odp_port_t odp_port1, odp_port2;
+            ofp_port_t ofp_port1, ofp_port2;
+
+            ofp_port1 = b_path_i->port_1;
+            odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
+
+            ofp_port2 = b_path_i->port_2;
+            odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
+
             /* remove ports from datapath */
-            odp_port_t odp_port1 = ofp_port_to_odp_port(ofproto, b_path_i->port_1);
-            VLOG_INFO("Deleting port %d\n", odp_port1);
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
             dpif_port_del(ofproto->backer->dpif, odp_port1);
 
-            odp_port_t odp_port2 = ofp_port_to_odp_port(ofproto, b_path_i->port_2);
-            VLOG_INFO("Deleting port %d\n", odp_port2);
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
             dpif_port_del(ofproto->backer->dpif, odp_port2);
 
              /* change netdev implementation */
             struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
+
             struct ofport * ofport_1;
-            struct ofport * ofport_2;
-            ofport_1 = ofproto_get_port(&ofproto->up, b_path_i->port_1);
+            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
+            ofport_1->netdev->n_rxq = 1;
+            ofport_1->netdev->n_txq = 1;
             ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
-            ofport_2 = ofproto_get_port(&ofproto->up, b_path_i->port_2);
+
+            struct ofport * ofport_2;
+            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
+            ofport_2->netdev->n_rxq = 1;
+            ofport_2->netdev->n_txq = 1;
             ofport_2->netdev->netdev_class = net->class;  /* this too */
 
             /* add "new" ports to the datapath */
-            odp_port_t port_1 = b_path_i->port_1;
-            odp_port_t port_2 = b_path_i->port_2;
-            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &port_1);
-            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &port_2);
+            odp_port_t odp_port1_ = odp_port1;
+            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
 
-            if((port_1 != odp_port1) || (port_2 != odp_port2))
+            odp_port_t odp_port2_ = odp_port2;
+            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
+
+            if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
 
-            /* deleted direct link */
-            netdev_dpdk_delete_direct_link(b_path_i->port_1, b_path_i->port_2);
+            /* XXX: Copy old packets to the new rings */
+
+            /* delete direct link */
+            netdev_dpdk_delete_direct_link(ofp_port1, ofp_port2);
         }
     }
 
     void * opaque;
 
-    /* look for inserted direct paths */
+    /*** look for new direct paths ***/
     LIST_FOR_EACH(b_path_i, list_node, &b_paths)
     {
         if(!list_contains_b_path(&direct_paths, b_path_i))
@@ -4275,10 +4291,10 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             ofp_port_t ofp_port1, ofp_port2;
 
             ofp_port1 = b_path_i->port_1;
-            odp_port1 = ofp_port_to_odp_port(ofproto, b_path_i->port_1);
+            odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
 
             ofp_port2 = b_path_i->port_2;
-            odp_port2 = ofp_port_to_odp_port(ofproto, b_path_i->port_2);
+            odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
 
             /* create direct link */
             netdev_dpdk_create_direct_link(ofp_port1, ofp_port2, &opaque);
@@ -4316,7 +4332,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
 
-            /* TODO: Copy old packets to the new rings */
+            /* XXX: Copy old packets to the new rings */
 
             /* tell the application that rings are available to use */
             netdev_dpdk_start_direct_link(opaque);
