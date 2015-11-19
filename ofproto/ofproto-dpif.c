@@ -4287,17 +4287,20 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             memcpy(t, (b_path_i), sizeof(*t));
             list_push_back(&direct_paths, &t->list_node);
 
-            odp_port_t odp_port1, odp_port2;
-            ofp_port_t ofp_port1, ofp_port2;
+            odp_port_t odp_port1, odp_port2;    /* datapath port numbers */
+            ofp_port_t ofp_port1, ofp_port2;    /* openflow port numbers */
+            struct ofport * ofport_1, * ofport_2;   /* openflow ports */
 
             ofp_port1 = b_path_i->port_1;
             odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
+            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
 
             ofp_port2 = b_path_i->port_2;
             odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
+            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
 
             /* create direct link */
-            netdev_dpdk_create_direct_link(ofp_port1, ofp_port2, &opaque);
+            netdev_dpdk_create_direct_link(ofport_1->netdev, ofport_2->netdev, &opaque);
 
             /* remove ports from datapath */
             VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
@@ -4308,14 +4311,11 @@ direct_paths_update(struct ofproto_dpif * ofproto)
 
             /* change netdev implementation */
             struct netdev_registered_class * net = netdev_lookup_class("dpdkdirect");
-            struct ofport * ofport_1;
-            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
+
             ofport_1->netdev->n_rxq = 0;
             ofport_1->netdev->n_txq = 0;
             ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
 
-            struct ofport * ofport_2;
-            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
             ofport_2->netdev->n_rxq = 0;
             ofport_2->netdev->n_txq = 0;
             ofport_2->netdev->netdev_class = net->class;  /* this too */

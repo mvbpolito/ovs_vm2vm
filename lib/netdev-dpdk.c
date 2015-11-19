@@ -206,7 +206,7 @@ static struct ovs_list dpdk_direct_link_list OVS_GUARDED_BY(dpdk_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_direct_link_list);
 
 struct dpdk_direct_link {
-    int port_numbers[2];
+    unsigned int port_numbers[2];
     struct rte_ring * rings[2];
     struct dpdk_ring * dpdk_rings[2];
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
@@ -2204,14 +2204,28 @@ remap_execute(char * cmdline, void * args)
  * numbers.
  * XXX: is this limination still true?
  */
-int netdev_dpdk_create_direct_link(int a_, int b_, void ** opaque)
+int netdev_dpdk_create_direct_link(char devname_a, char devname_b, void ** opaque)
 {
-    VLOG_INFO("Creating direct link %d <-> %d\n", a_, b_);
+    VLOG_INFO("Creating direct link %s <-> %s\n", devname_a, devname_b);
+
+    int err;
+    unsigned int a_, b_;
 
     struct dpdk_direct_link * direct_link;
     struct rte_ring * ring_a_b, * ring_b_a;
     struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
 
+    err = dpdk_dev_parse_name(devname_a, "dpdkr", a_);
+    if(err){
+        LOG_INFO("Invalid device name: %s\n", devname_a);
+        return -1;
+    }
+
+    err = dpdk_dev_parse_name(devname_b, "dpdkr", b_);
+    if(err){
+        LOG_INFO("Invalid device name: %s\n", devname_b);
+        return -1;
+    }
     /* ports that are directly connected */
     int a = MIN(a_, b_);
     int b = MAX(a_, b_);
