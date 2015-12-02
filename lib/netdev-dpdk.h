@@ -29,9 +29,9 @@ void netdev_dpdk_register(void);
 void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
 
-int netdev_dpdk_create_direct_link(int a, int b, void ** opaque);
+int netdev_dpdk_create_direct_link(char * devname_a, char * devname_b, void ** opaque);
 void netdev_dpdk_start_direct_link(void * opaque);
-int netdev_dpdk_delete_direct_link(int a, int b);
+int netdev_dpdk_delete_direct_link(char * devname_a, char * devname_b);
 
 #else
 

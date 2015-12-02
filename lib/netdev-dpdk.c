@@ -2204,7 +2204,7 @@ remap_execute(char * cmdline, void * args)
  * numbers.
  * XXX: is this limination still true?
  */
-int netdev_dpdk_create_direct_link(char devname_a, char devname_b, void ** opaque)
+int netdev_dpdk_create_direct_link(char * devname_a, char * devname_b, void ** opaque)
 {
     VLOG_INFO("Creating direct link %s <-> %s\n", devname_a, devname_b);
 
@@ -2215,15 +2215,15 @@ int netdev_dpdk_create_direct_link(char devname_a, char devname_b, void ** opaqu
     struct rte_ring * ring_a_b, * ring_b_a;
     struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
 
-    err = dpdk_dev_parse_name(devname_a, "dpdkr", a_);
+    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
     if(err){
-        LOG_INFO("Invalid device name: %s\n", devname_a);
+        VLOG_INFO("Invalid device name: %s\n", devname_a);
         return -1;
     }
 
-    err = dpdk_dev_parse_name(devname_b, "dpdkr", b_);
+    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
     if(err){
-        LOG_INFO("Invalid device name: %s\n", devname_b);
+        VLOG_INFO("Invalid device name: %s\n", devname_b);
         return -1;
     }
     /* ports that are directly connected */
@@ -2395,10 +2395,12 @@ void netdev_dpdk_start_direct_link(void * opaque)
  * currently the rings are not actually deleted, they are just removed from
  * the list (dpdk does not yet support removing rings)
  */
-int netdev_dpdk_delete_direct_link(int a_, int b_)
+int netdev_dpdk_delete_direct_link(char * devname_a, char * devname_b)
 {
     VLOG_INFO("Deleting direct_link\n");
 
+    int err;
+    unsigned int a_, b_;
     struct dpdk_direct_link * direct_link;
     /* original ports */
     struct dpdk_ring * dpdk_ring_a;
@@ -2412,6 +2414,18 @@ int netdev_dpdk_delete_direct_link(int a_, int b_)
     /* rings used in direct communication */
     struct rte_ring * ring_a_b;
     struct rte_ring * ring_b_a;
+
+    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
+    if(err){
+        VLOG_INFO("Invalid device name: %s\n", devname_a);
+        return -1;
+    }
+
+    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
+    if(err){
+        VLOG_INFO("Invalid device name: %s\n", devname_b);
+        return -1;
+    }
 
     /* ports that are directly connected */
     int a = MIN(a_, b_);
