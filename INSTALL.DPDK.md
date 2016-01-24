@@ -78,7 +78,7 @@ Refer to [INSTALL.userspace.md] for general requirements of building userspace O
 
 Using the DPDK with ovs-vswitchd:
 ---------------------------------
-
+ 
 1. Setup system boot
    Add the following options to the kernel bootline:
    
