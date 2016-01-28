@@ -2320,20 +2320,12 @@ int netdev_dpdk_create_direct_link(char * devname_in, char * devname_out, void *
     old[0] = dpdk_ring_in->cring_rx;
     new[0] = ring;
 
-    ///* 2: Remap tx (rx for the app) ring on a */
-    //old[1] = dpdk_ring_a->cring_tx;
-    //new[1] = ring_b_a;
-
     remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
     snprintf(port_name, sizeof(port_name), "dpdkr%d", out);
-    /* 3: Remap rx (tx for the app) ring on b */
-    old[0] = dpdk_ring_out->cring_rx;
+    /* 2: Remap tx (rx for the app) ring on b */
+    old[0] = dpdk_ring_out->cring_tx;
     new[0] = ring;
-
-    ///* 4: Remap tx (rx for the app) ring on b */
-    //old[1] = dpdk_ring_b->cring_tx;
-    //new[1] = ring_a_b;
 
     remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
