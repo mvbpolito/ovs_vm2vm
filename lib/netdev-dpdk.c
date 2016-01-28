@@ -2392,101 +2392,89 @@ void netdev_dpdk_start_direct_link(void * opaque)
  * currently the rings are not actually deleted, they are just removed from
  * the list (dpdk does not yet support removing rings)
  */
-int netdev_dpdk_delete_direct_link(char * devname_a, char * devname_b)
+int netdev_dpdk_delete_direct_link(char * devname_in, char * devname_out)
 {
-    VLOG_INFO("Deleting direct_link\n");
+    VLOG_INFO("Deleting direct_link %s -> %s\n", devname_in, devname_out);
 
-    //int err;
-    //unsigned int a_, b_;
-    //struct dpdk_direct_link * direct_link;
-    ///* original ports */
-    //struct dpdk_ring * dpdk_ring_a;
-    //struct dpdk_ring * dpdk_ring_b;
-    //char cmdline[PATH_MAX];
-    //char port_name[20];
-    //
-    //struct rte_ring * old[2];
-    //struct rte_ring * new[2];
-    //
-    ///* rings used in direct communication */
-    //struct rte_ring * ring_a_b;
-    //struct rte_ring * ring_b_a;
-    //
-    //err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
-    //if(err){
-    //    VLOG_INFO("Invalid device name: %s\n", devname_a);
-    //    return -1;
-    //}
-    //
-    //err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
-    //if(err){
-    //    VLOG_INFO("Invalid device name: %s\n", devname_b);
-    //    return -1;
-    //}
-    //
-    ///* ports that are directly connected */
-    //int a = MIN(a_, b_);
-    //int b = MAX(a_, b_);
-    //
-    //ovs_assert(a != b);
-    //
-    //bool found = false;
-    //
-    //LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-    //    if (direct_link->port_numbers[0] == a &&
-    //        direct_link->port_numbers[1] == b)
-    //    {
-    //        list_remove(&direct_link->list_node);
-    //        found = true;
-    //        break;
-    //    }
-    //}
-    //
-    //if(!found)
-    //{
-    //    VLOG_INFO("Direct link %d <-> %d not found\n", a, b);
-    //    return -1; /* XXX: Better error code here */
-    //}
-    //
-    //ring_a_b = direct_link->rings[0];
-    //ring_b_a = direct_link->rings[1];
-    //
-    //dpdk_ring_a = direct_link->dpdk_rings[0];
-    //dpdk_ring_b = direct_link->dpdk_rings[1];
-    //
-    ///* XXX: ovs used to crash here.. */
-    ////free(direct_link);
-    //
-    ///* this basically undo all the changes done in the creation */
-    //
-    //snprintf(port_name, 20, "dpdkr%d", a);
-    //
-    ///* 1: Remap rx (tx for the app) ring on a */
-    //old[0] = dpdk_ring_a->cring_rx;	/* this is rare but old means original ring*/
-    //new[0] = dpdk_ring_a->cring_rx;
-    //
-    ///* 2: Remap tx (rx for the app) ring on a */
-    //old[1] = dpdk_ring_a->cring_tx;
-    //new[1] = dpdk_ring_a->cring_tx;
-    //
-    //remap_rings(new, old, 2, remap_execute, (void *) port_name);
-    //
-    //snprintf(port_name, 20, "dpdkr%d", b);
-    ///* 3: Remap rx (tx for the app) ring on b */
-    //old[0] = dpdk_ring_b->cring_rx;
-    //new[0] = dpdk_ring_b->cring_rx;
-    //
-    ///* 4: Remap tx (rx for the app) ring on b */
-    //old[1] = dpdk_ring_b->cring_tx; /* this is rare but old means original ring*/
-    //new[1] = dpdk_ring_b->cring_tx;
-    //remap_rings(new, old, 2, remap_execute, (void *) port_name);
-    //
-    ///* XXX: is it really necessary? */
-    ///* all the rings can be used */
-    //rte_spinlock_unlock(&dpdk_ring_a->cring_rx->usable);
-    //rte_spinlock_unlock(&dpdk_ring_a->cring_tx->usable);
-    //rte_spinlock_unlock(&dpdk_ring_b->cring_rx->usable);
-    //rte_spinlock_unlock(&dpdk_ring_b->cring_tx->usable);
+    int err;
+    unsigned int in, out;
+
+    struct dpdk_direct_link * direct_link;
+    /* original ports */
+    struct dpdk_ring * dpdk_ring_in;
+    struct dpdk_ring * dpdk_ring_out;
+    char cmdline[PATH_MAX];
+    char port_name[RTE_RING_NAMESIZE];
+
+    struct rte_ring * old[1];
+    struct rte_ring * new[1];
+
+    /* rings used in direct communication */
+    struct rte_ring * ring;
+
+    err = dpdk_dev_parse_name(devname_in, "dpdkr", &in);
+    if(err){
+        VLOG_INFO("Invalid device name: %s\n", devname_in);
+        return -1;
+    }
+
+    err = dpdk_dev_parse_name(devname_out, "dpdkr", &out);
+    if(err){
+        VLOG_INFO("Invalid device name: %s\n", devname_out);
+        return -1;
+    }
+
+    ovs_assert(in != out);
+
+    bool found = false;
+
+    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+        if (direct_link->in_port == in &&
+            direct_link->out_port == out)
+        {
+            list_remove(&direct_link->list_node);
+            found = true;
+            break;
+        }
+    }
+
+    if(!found)
+    {
+        VLOG_INFO("Direct link %d -> %d not found\n", in, out);
+        return -1; /* XXX: Better error code here */
+    }
+
+    ring = direct_link->ring;
+
+    dpdk_ring_in = direct_link->dpdkr_in;
+    dpdk_ring_out = direct_link->dpdkr_out;
+
+    /* XXX: ovs used to crash here.. */
+    //free(direct_link);
+
+    /* this basically undo all the changes done in the creation */
+
+    snprintf(port_name, sizeof(port_name), "dpdkr%d", in);
+
+    /* 1: Remap rx (tx for the app) ring on a */
+    old[0] = dpdk_ring_in->cring_rx;	/* this is rare but old means original ring*/
+    new[0] = dpdk_ring_in->cring_rx;
+
+    remap_rings(new, old, 1, remap_execute, (void *) port_name);
+
+    snprintf(port_name, sizeof(port_name), "dpdkr%d", out);
+    /* 3: Remap tx (rx for the app) ring on b */
+    old[0] = dpdk_ring_out->cring_tx;
+    new[0] = dpdk_ring_out->cring_tx;
+
+    remap_rings(new, old, 1, remap_execute, (void *) port_name);
+
+    /* XXX: is it really necessary? */
+    /* all the rings can be used */
+    rte_spinlock_unlock(&dpdk_ring_in->cring_rx->usable);
+    rte_spinlock_unlock(&dpdk_ring_in->cring_tx->usable);
+    rte_spinlock_unlock(&dpdk_ring_out->cring_rx->usable);
+    rte_spinlock_unlock(&dpdk_ring_out->cring_tx->usable);
 
     /*
     * TODO:

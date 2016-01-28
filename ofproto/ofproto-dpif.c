@@ -4227,18 +4227,18 @@ direct_paths_update(struct ofproto_dpif * ofproto)
 
             /* XXX: when to free(b_path_i) ? */
 
-            //odp_port_t odp_port1, odp_port2; /* dapath port numbers */
-            //ofp_port_t ofp_port1, ofp_port2; /* open flow port numbers */
-            //struct ofport * ofport_1, * ofport_2; /* open flow ports */
-            //
-            //ofp_port1 = b_path_i->port_1;
-            //odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
-            //ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
-            //
-            //ofp_port2 = b_path_i->port_2;
-            //odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
-            //ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
-            //
+            odp_port_t odp_in_port, odp_out_port;    /* datapath port numbers */
+            ofp_port_t ofp_in_port, ofp_out_port;    /* openflow port numbers */
+            struct ofport * ofport_in_port, * ofport_out_port;   /* openflow ports */
+
+            ofp_in_port = u_path_i->in_port;
+            odp_in_port = ofp_port_to_odp_port(ofproto, ofp_in_port);
+            ofport_in_port = ofproto_get_port(&ofproto->up, ofp_in_port);
+
+            ofp_out_port = u_path_i->out_port;
+            odp_out_port = ofp_port_to_odp_port(ofproto, ofp_out_port);
+            ofport_out_port = ofproto_get_port(&ofproto->up, ofp_out_port);
+
             //if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkdirect") ||
             //    strcmp(ofport_2->netdev->netdev_class->type, "dpdkdirect"))
             //{
@@ -4247,42 +4247,71 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             //}
 
             ///* remove ports from datapath */
-            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
-            //dpif_port_del(ofproto->backer->dpif, odp_port1);
-            //
-            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
-            //dpif_port_del(ofproto->backer->dpif, odp_port2);
-            //
-            // /* change netdev implementation */
-            //struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
-            //
-            //ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
-            //ofport_1->netdev->n_rxq = 1;
-            //ofport_1->netdev->n_txq = 1;
-            //ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
-            //
-            //ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
-            //ofport_2->netdev->n_rxq = 1;
-            //ofport_2->netdev->n_txq = 1;
-            //ofport_2->netdev->netdev_class = net->class;  /* this too */
-            //
-            ///* add "new" ports to the datapath */
-            //odp_port_t odp_port1_ = odp_port1;
-            //dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
-            //
-            //odp_port_t odp_port2_ = odp_port2;
-            //dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
-            //
-            //if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
-            //{
-            //    VLOG_ERR("DirectPath: Port numbers have changed\n");
-            //}
-            //
-            ///* XXX: Copy old packets to the new rings */
-            //
-            ///* delete direct link */
-            //netdev_dpdk_delete_direct_link(ofport_1->netdev->name,
-            //                               ofport_2->netdev->name);
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_in_port, odp_in_port);
+            dpif_port_del(ofproto->backer->dpif, odp_in_port);
+
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_out_port, odp_out_port);
+            dpif_port_del(ofproto->backer->dpif, odp_out_port);
+
+            /* was it a duplex direct path? */
+            bool fullDirect = false;
+            struct u_path * path_j;
+
+            LIST_FOR_EACH(path_j, list_node, &direct_paths)
+            {
+                if((path_i->in_port == path_j->out_port) &&
+                    (path_j->in_port == path_i->out_port))
+                {
+                    fullDirect = true;
+                    VLOG_INFO("Direct path %d -> %d is full direct\n",
+                        path_i->in_port, path_j->out_port);
+                    break;
+                }
+            }
+
+            /* change netdev implementation */
+            if(!fullDirect) {
+                struct netdev_registered_class * class1;
+                struct netdev_registered_class * class2;
+
+                class1 = netdev_lookup_class("dpdkdirect1");
+                class2 = netdev_lookup_class("dpdkdirect2");
+
+                ofport_in_port->netdev->n_rxq = 0;
+                ofport_in_port->netdev->netdev_class = class1->class;   /* this hurts my eyes */
+
+                ofport_out_port->netdev->n_txq = 0;
+                ofport_out_port->netdev->netdev_class = class2->class;  /* this too */
+            } else {
+
+                struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
+
+                ofport_in_port->netdev->n_rxq = 1;
+                ofport_in_port->netdev->n_txq = 1;
+                ofport_in_port->netdev->netdev_class = net->class;   /* this hurts my eyes */
+
+                ofport_out_port->netdev->n_rxq = 1;
+                ofport_out_port->netdev->n_txq = 1;
+                ofport_out_port->netdev->netdev_class = net->class;  /* this too */
+            }
+
+            /* add "new" ports to the datapath */
+            odp_port_t odp_in_port_ = odp_in_port;
+            dpif_port_add(ofproto->backer->dpif, ofport_in_port->netdev, &odp_in_port_);
+
+            odp_port_t odp_out_port_ = odp_out_port;
+            dpif_port_add(ofproto->backer->dpif, ofport_out_port->netdev, &odp_out_port_);
+
+            if((odp_in_port != odp_in_port_) || (odp_out_port != odp_out_port_))
+            {
+                VLOG_ERR("DirectPath: Port numbers have changed\n");
+            }
+
+            /* XXX: Copy old packets to the new rings */
+
+            /* delete direct link */
+            netdev_dpdk_delete_direct_link(ofport_in_port->netdev->name,
+                                           ofport_out_port->netdev->name);
         }
     }
 
@@ -4311,14 +4340,14 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             ofp_out_port = u_path_i->out_port;
             odp_out_port = ofp_port_to_odp_port(ofproto, ofp_out_port);
             ofport_out_port = ofproto_get_port(&ofproto->up, ofp_out_port);
-            //
+
             //if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkr") ||
             //    strcmp(ofport_2->netdev->netdev_class->type, "dpdkr"))
             //{
             //    VLOG_INFO("Direct path is not dpdkr, ignoring...\n");
             //    continue;   /* is a direct path, but not between dpdkr */
             //}
-            //
+
             ///* create direct link */
             netdev_dpdk_create_direct_link(ofport_in_port->netdev->name,
                                            ofport_out_port->netdev->name, &opaque);
@@ -4340,8 +4369,8 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                     (path_j->in_port == path_i->out_port))
                 {
                     fullDirect = true;
-                    VLOG_INFO("Direct path %d <-> %d is full direct\n",
-                        path_i->in_port, path_j->in_port);
+                    VLOG_INFO("Direct path %d -> %d is full direct\n",
+                        path_i->in_port, path_j->out_port);
                     break;
                 }
             }
@@ -4372,7 +4401,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                 ofport_out_port->netdev->n_txq = 0;
                 ofport_out_port->netdev->netdev_class = class2->class;  /* this too */
             }
-            //
+
             //netdev_ref(ofport_1->netdev); /* XXX: IT IS A WORKAROUND */
             //netdev_ref(ofport_2->netdev); /* XXX: IT IS A WORKAROUND */
 
@@ -4387,10 +4416,10 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
-            //
-            ///* XXX: Copy old packets to the new rings */
-            //
-            ///* tell the application that rings are available to use */
+
+            /* XXX: Copy old packets to the new rings */
+
+            /* tell the application that rings are available to use */
             netdev_dpdk_start_direct_link(opaque);
         }
     }
