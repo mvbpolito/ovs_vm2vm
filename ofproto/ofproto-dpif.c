@@ -4270,7 +4270,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             }
 
             /* change netdev implementation */
-            if(!fullDirect) {
+            if(fullDirect) {
                 struct netdev_registered_class * class1;
                 struct netdev_registered_class * class2;
 
