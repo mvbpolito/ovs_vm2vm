@@ -206,9 +206,11 @@ static struct ovs_list dpdk_direct_link_list OVS_GUARDED_BY(dpdk_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_direct_link_list);
 
 struct dpdk_direct_link {
-    unsigned int port_numbers[2];
-    struct rte_ring * rings[2];
-    struct dpdk_ring * dpdk_rings[2];
+    unsigned int in_port;
+    unsigned int out_port;
+    struct rte_ring * ring;
+    struct dpdk_ring * dpdkr_in;
+    struct dpdk_ring * dpdkr_out;
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
 };
 
@@ -1519,41 +1521,48 @@ netdev_dpdk_direct_link_get_stats(const struct netdev *netdev,
         struct netdev_stats *stats)
 {
     //VLOG_INFO("netdev_dpdk_direct_link_get_stats()\n");
-    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
-    struct rte_ring_stats ring_stats_tx;
-    struct rte_ring_stats ring_stats_rx;
-    struct dpdk_direct_link * direct_link;
+    //struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    //struct rte_ring_stats ring_stats_tx;
+    //struct rte_ring_stats ring_stats_rx;
+    //struct dpdk_direct_link * direct_link;
+    //
+    //int dpdk_ring_index = -1;
+    //
+    //LIST_FOR_EACH(direct_link, list_node, &dpdk_direct_link_list)
+    //{
+    //    if(direct_link->dpdk_rings[0]->eth_port_id == dev->port_id)
+    //    {
+    //       dpdk_ring_index = 0;
+    //       break;
+    //   }
+    //
+    //    if(direct_link->dpdk_rings[1]->eth_port_id == dev->port_id)
+    //    {
+    //        dpdk_ring_index = 1;
+    //        break;
+    //    }
+    //}
+    //
+    //if(dpdk_ring_index == -1)
+    //    return -1; /* XXX: better error return code here */
+    //
+    //rte_ring_get_stats(direct_link->rings[dpdk_ring_index], &ring_stats_tx);
+    //rte_ring_get_stats(direct_link->rings[1-dpdk_ring_index], &ring_stats_rx);
+    //
+    ///* supported stats */
+    //stats->tx_packets = ring_stats_tx.tx;
+    //stats->rx_packets = ring_stats_rx.tx;
+    //stats->tx_errors = ring_stats_tx.err;
+    //stats->rx_errors = ring_stats_rx.err;
+    //stats->tx_dropped = ring_stats_tx.err;
+    //stats->rx_dropped = ring_stats_rx.err;
 
-    int dpdk_ring_index = -1;
-
-    LIST_FOR_EACH(direct_link, list_node, &dpdk_direct_link_list)
-    {
-        if(direct_link->dpdk_rings[0]->eth_port_id == dev->port_id)
-        {
-           dpdk_ring_index = 0;
-           break;
-       }
-
-        if(direct_link->dpdk_rings[1]->eth_port_id == dev->port_id)
-        {
-            dpdk_ring_index = 1;
-            break;
-        }
-    }
-
-    if(dpdk_ring_index == -1)
-        return -1; /* XXX: better error return code here */
-
-    rte_ring_get_stats(direct_link->rings[dpdk_ring_index], &ring_stats_tx);
-    rte_ring_get_stats(direct_link->rings[1-dpdk_ring_index], &ring_stats_rx);
-
-    /* supported stats */
-    stats->tx_packets = ring_stats_tx.tx;
-    stats->rx_packets = ring_stats_rx.tx;
-    stats->tx_errors = ring_stats_tx.err;
-    stats->rx_errors = ring_stats_rx.err;
-    stats->tx_dropped = ring_stats_tx.err;
-    stats->rx_dropped = ring_stats_rx.err;
+    stats->tx_packets   = UINT64_MAX;
+    stats->rx_packets   = UINT64_MAX;
+    stats->tx_errors    = UINT64_MAX;
+    stats->rx_errors    = UINT64_MAX;
+    stats->tx_dropped   = UINT64_MAX;
+    stats->rx_dropped   = UINT64_MAX;
 
     /* unsupported stats */
     stats->rx_bytes = UINT64_MAX;
@@ -2198,146 +2207,142 @@ remap_execute(char * cmdline, void * args)
 }
 
 /*
- * creates a pair of links in order to be used in a direct path between two
+ * creates a ring in order to be used in a direct path between two
  * apps runnings inside a virtual machine
  * There a limitation that the port numbers should be equal to the openflow
  * numbers.
  * XXX: is this limination still true?
  */
-int netdev_dpdk_create_direct_link(char * devname_a, char * devname_b, void ** opaque)
+int netdev_dpdk_create_direct_link(char * devname_in, char * devname_out, void ** opaque)
 {
-    VLOG_INFO("Creating direct link %s <-> %s\n", devname_a, devname_b);
+    VLOG_INFO("Creating direct link %s -> %s\n", devname_in, devname_out);
 
     int err;
-    unsigned int a_, b_;
+    unsigned int in, out;
 
     struct dpdk_direct_link * direct_link;
-    struct rte_ring * ring_a_b, * ring_b_a;
-    struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
+    struct rte_ring * ring;
+    struct dpdk_ring * dpdk_ring_in = NULL, * dpdk_ring_out = NULL;
 
-    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
+    err = dpdk_dev_parse_name(devname_in, "dpdkr", &in);
     if(err){
-        VLOG_INFO("Invalid device name: %s\n", devname_a);
+        VLOG_INFO("Invalid device name: %s\n", devname_in);
         return -1;
     }
 
-    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
+    err = dpdk_dev_parse_name(devname_out, "dpdkr", &out);
     if(err){
-        VLOG_INFO("Invalid device name: %s\n", devname_b);
+        VLOG_INFO("Invalid device name: %s\n", devname_out);
         return -1;
     }
-    /* ports that are directly connected */
-    int a = MIN(a_, b_);
-    int b = MAX(a_, b_);
 
     /* arrays use to remmap rings */
-    struct rte_ring * old[2];
-    struct rte_ring * new[2];
+    struct rte_ring * old[1];
+    struct rte_ring * new[1];
 
-    char ring_name[20];
-    char port_name[20];
+    char ring_name[RTE_RING_NAMESIZE];
+    char port_name[RTE_RING_NAMESIZE];
 
-    ovs_assert(a != b);
+    ovs_assert(in != out);
 
     ovs_mutex_lock(&dpdk_mutex);
 
     /* sanity check: is there another link that uses this ports? */
     LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-        if (direct_link->port_numbers[0] == a ||
-            direct_link->port_numbers[1] == b)
+        if (direct_link->in_port == in || direct_link->out_port == out)
         {
-            VLOG_INFO("A direct link using this ports already exists!\n");
+            VLOG_INFO("A direct link using these ports already exists!\n");
             goto error_unlock;
         }
     }
 
-    /* sanity check: do exist this ports? */
-    struct dpdk_ring * ring;
-    LIST_FOR_EACH(ring, list_node, &dpdk_ring_list) {
-        if(ring->user_port_id == a)
-            dpdk_ring_a = ring;
+    /* sanity check: do exist these ports? */
+    struct dpdk_ring * ring_i;
+    LIST_FOR_EACH(ring_i, list_node, &dpdk_ring_list) {
+        if(ring_i->user_port_id == in)
+            dpdk_ring_in = ring_i;
 
-        if(ring->user_port_id == b)
-            dpdk_ring_b = ring;
+        if(ring_i->user_port_id == out)
+            dpdk_ring_out = ring_i;
 
-        if(dpdk_ring_a && dpdk_ring_b)
+        if(dpdk_ring_out && dpdk_ring_in)
             break;
     }
 
-    if(dpdk_ring_a == NULL || dpdk_ring_b == NULL)
+    if(dpdk_ring_in == NULL || dpdk_ring_out == NULL)
     {
         VLOG_ERR("Ports do not exist\n");
         goto error_unlock;
     }
 
-    /* Ports exist and are not used withing another direct link */
+    /* Ports exist and are not used within another direct link */
     direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
 
-    direct_link->port_numbers[0] = a;
-    direct_link->port_numbers[1] = b;
+    direct_link->in_port = in;
+    direct_link->out_port = out;
 
-    direct_link->dpdk_rings[0] = dpdk_ring_a;
-    direct_link->dpdk_rings[1] = dpdk_ring_b;
+    direct_link->dpdkr_in = dpdk_ring_in;
+    direct_link->dpdkr_out = dpdk_ring_out;
 
     /* lookup for ring a to b, if does not exist create it */
-    snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, a, b);
-    ring_a_b = rte_ring_lookup(ring_name);
-    if(ring_a_b == NULL)
-        ring_a_b = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+    snprintf(ring_name, sizeof(ring_name), DIRECT_LINK_NAME_FORMAT, in, out);
+    ring = rte_ring_lookup(ring_name);
+    if(ring == NULL)
+        ring = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
                             RING_F_SP_ENQ | RING_F_SC_DEQ);
-    if(ring_a_b == NULL){
+    if(ring == NULL){
         rte_free(direct_link);
         return ENOMEM;
     }
 
-    direct_link->rings[0] = ring_a_b;
+    direct_link->ring = ring;
 
-    /* lookup for ring b to a, if does not exist create it */
-    snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, b, a);
-    ring_b_a = rte_ring_lookup(ring_name);
-    if(ring_b_a == NULL)
-        ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
-                            RING_F_SP_ENQ | RING_F_SC_DEQ);
-    if(ring_b_a == NULL){
-        rte_free(direct_link);
-        return ENOMEM;
-    }
+    ///* lookup for ring b to a, if does not exist create it */
+    //snprintf(ring_name, 20, DIRECT_LINK_NAME_FORMAT, b, a);
+    //ring_b_a = rte_ring_lookup(ring_name);
+    //if(ring_b_a == NULL)
+    //    ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+    //                        RING_F_SP_ENQ | RING_F_SC_DEQ);
+    //if(ring_b_a == NULL){
+    //    rte_free(direct_link);
+    //    return ENOMEM;
+    //}
 
-    direct_link->rings[1] = ring_b_a;
+    //direct_link->rings[1] = ring_b_a;
 
     /*
      * rx and tx rings name convention is according to ovs, it means, the rx
      * ring would be the tx ting for the VM app
     */
 
-    snprintf(port_name, 20, "dpdkr%d", a);
+    snprintf(port_name, sizeof(port_name), "dpdkr%d", in);
     /*1: Remap rx (tx for the app) ring on a */
-    old[0] = dpdk_ring_a->cring_rx;
-    new[0] = ring_a_b;
+    old[0] = dpdk_ring_in->cring_rx;
+    new[0] = ring;
 
-    /* 2: Remap tx (rx for the app) ring on a */
-    old[1] = dpdk_ring_a->cring_tx;
-    new[1] = ring_b_a;
+    ///* 2: Remap tx (rx for the app) ring on a */
+    //old[1] = dpdk_ring_a->cring_tx;
+    //new[1] = ring_b_a;
 
-    remap_rings(old, new, 2, remap_execute, (void *) port_name);
+    remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
-    snprintf(port_name, 20, "dpdkr%d", b);
+    snprintf(port_name, sizeof(port_name), "dpdkr%d", out);
     /* 3: Remap rx (tx for the app) ring on b */
-    old[0] = dpdk_ring_b->cring_rx;
-    new[0] = ring_b_a;
+    old[0] = dpdk_ring_out->cring_rx;
+    new[0] = ring;
 
-    /* 4: Remap tx (rx for the app) ring on b */
-    old[1] = dpdk_ring_b->cring_tx;
-    new[1] = ring_a_b;
+    ///* 4: Remap tx (rx for the app) ring on b */
+    //old[1] = dpdk_ring_b->cring_tx;
+    //new[1] = ring_a_b;
 
-    remap_rings(old, new, 2, remap_execute, (void *) port_name);
+    remap_rings(old, new, 1, remap_execute, (void *) port_name);
 
     list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
 
     /*
      * TODO:
      * Think about locks, are additional locks required?
-     * Many more thing surely
+     * Many more things surely
      */
 
     if(opaque != NULL)
@@ -2369,11 +2374,11 @@ void netdev_dpdk_start_direct_link(void * opaque)
     if(direct_link == NULL)
         return;
 
-    r = direct_link->rings[0];
+    r = direct_link->ring;
     rte_spinlock_unlock(&r->usable);
 
-    r = direct_link->rings[1];
-    rte_spinlock_unlock(&r->usable);
+    //r = direct_link->dpdkr_out;
+    //rte_spinlock_unlock(&r->usable);
 
     //r = direct_link->dpdk_rings[0]->cring_rx;
     //rte_spinlock_unlock(&r->usable);
@@ -2399,97 +2404,97 @@ int netdev_dpdk_delete_direct_link(char * devname_a, char * devname_b)
 {
     VLOG_INFO("Deleting direct_link\n");
 
-    int err;
-    unsigned int a_, b_;
-    struct dpdk_direct_link * direct_link;
-    /* original ports */
-    struct dpdk_ring * dpdk_ring_a;
-    struct dpdk_ring * dpdk_ring_b;
-    char cmdline[PATH_MAX];
-    char port_name[20];
-
-    struct rte_ring * old[2];
-    struct rte_ring * new[2];
-
-    /* rings used in direct communication */
-    struct rte_ring * ring_a_b;
-    struct rte_ring * ring_b_a;
-
-    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
-    if(err){
-        VLOG_INFO("Invalid device name: %s\n", devname_a);
-        return -1;
-    }
-
-    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
-    if(err){
-        VLOG_INFO("Invalid device name: %s\n", devname_b);
-        return -1;
-    }
-
-    /* ports that are directly connected */
-    int a = MIN(a_, b_);
-    int b = MAX(a_, b_);
-
-    ovs_assert(a != b);
-
-    bool found = false;
-
-    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
-        if (direct_link->port_numbers[0] == a &&
-            direct_link->port_numbers[1] == b)
-        {
-            list_remove(&direct_link->list_node);
-            found = true;
-            break;
-        }
-    }
-
-    if(!found)
-    {
-        VLOG_INFO("Direct link %d <-> %d not found\n", a, b);
-        return -1; /* XXX: Better error code here */
-    }
-
-    ring_a_b = direct_link->rings[0];
-    ring_b_a = direct_link->rings[1];
-
-    dpdk_ring_a = direct_link->dpdk_rings[0];
-    dpdk_ring_b = direct_link->dpdk_rings[1];
-
-    /* XXX: ovs used to crash here.. */
-    //free(direct_link);
-
-    /* this basically undo all the changes done in the creation */
-
-    snprintf(port_name, 20, "dpdkr%d", a);
-
-    /* 1: Remap rx (tx for the app) ring on a */
-    old[0] = dpdk_ring_a->cring_rx;	/* this is rare but old means original ring*/
-    new[0] = dpdk_ring_a->cring_rx;
-
-    /* 2: Remap tx (rx for the app) ring on a */
-    old[1] = dpdk_ring_a->cring_tx;
-    new[1] = dpdk_ring_a->cring_tx;
-
-    remap_rings(new, old, 2, remap_execute, (void *) port_name);
-
-    snprintf(port_name, 20, "dpdkr%d", b);
-    /* 3: Remap rx (tx for the app) ring on b */
-    old[0] = dpdk_ring_b->cring_rx;
-    new[0] = dpdk_ring_b->cring_rx;
-
-    /* 4: Remap tx (rx for the app) ring on b */
-    old[1] = dpdk_ring_b->cring_tx; /* this is rare but old means original ring*/
-    new[1] = dpdk_ring_b->cring_tx;
-    remap_rings(new, old, 2, remap_execute, (void *) port_name);
-
-    /* XXX: is it really necessary? */
-    /* all the rings can be used */
-    rte_spinlock_unlock(&dpdk_ring_a->cring_rx->usable);
-    rte_spinlock_unlock(&dpdk_ring_a->cring_tx->usable);
-    rte_spinlock_unlock(&dpdk_ring_b->cring_rx->usable);
-    rte_spinlock_unlock(&dpdk_ring_b->cring_tx->usable);
+    //int err;
+    //unsigned int a_, b_;
+    //struct dpdk_direct_link * direct_link;
+    ///* original ports */
+    //struct dpdk_ring * dpdk_ring_a;
+    //struct dpdk_ring * dpdk_ring_b;
+    //char cmdline[PATH_MAX];
+    //char port_name[20];
+    //
+    //struct rte_ring * old[2];
+    //struct rte_ring * new[2];
+    //
+    ///* rings used in direct communication */
+    //struct rte_ring * ring_a_b;
+    //struct rte_ring * ring_b_a;
+    //
+    //err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
+    //if(err){
+    //    VLOG_INFO("Invalid device name: %s\n", devname_a);
+    //    return -1;
+    //}
+    //
+    //err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
+    //if(err){
+    //    VLOG_INFO("Invalid device name: %s\n", devname_b);
+    //    return -1;
+    //}
+    //
+    ///* ports that are directly connected */
+    //int a = MIN(a_, b_);
+    //int b = MAX(a_, b_);
+    //
+    //ovs_assert(a != b);
+    //
+    //bool found = false;
+    //
+    //LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+    //    if (direct_link->port_numbers[0] == a &&
+    //        direct_link->port_numbers[1] == b)
+    //    {
+    //        list_remove(&direct_link->list_node);
+    //        found = true;
+    //        break;
+    //    }
+    //}
+    //
+    //if(!found)
+    //{
+    //    VLOG_INFO("Direct link %d <-> %d not found\n", a, b);
+    //    return -1; /* XXX: Better error code here */
+    //}
+    //
+    //ring_a_b = direct_link->rings[0];
+    //ring_b_a = direct_link->rings[1];
+    //
+    //dpdk_ring_a = direct_link->dpdk_rings[0];
+    //dpdk_ring_b = direct_link->dpdk_rings[1];
+    //
+    ///* XXX: ovs used to crash here.. */
+    ////free(direct_link);
+    //
+    ///* this basically undo all the changes done in the creation */
+    //
+    //snprintf(port_name, 20, "dpdkr%d", a);
+    //
+    ///* 1: Remap rx (tx for the app) ring on a */
+    //old[0] = dpdk_ring_a->cring_rx;	/* this is rare but old means original ring*/
+    //new[0] = dpdk_ring_a->cring_rx;
+    //
+    ///* 2: Remap tx (rx for the app) ring on a */
+    //old[1] = dpdk_ring_a->cring_tx;
+    //new[1] = dpdk_ring_a->cring_tx;
+    //
+    //remap_rings(new, old, 2, remap_execute, (void *) port_name);
+    //
+    //snprintf(port_name, 20, "dpdkr%d", b);
+    ///* 3: Remap rx (tx for the app) ring on b */
+    //old[0] = dpdk_ring_b->cring_rx;
+    //new[0] = dpdk_ring_b->cring_rx;
+    //
+    ///* 4: Remap tx (rx for the app) ring on b */
+    //old[1] = dpdk_ring_b->cring_tx; /* this is rare but old means original ring*/
+    //new[1] = dpdk_ring_b->cring_tx;
+    //remap_rings(new, old, 2, remap_execute, (void *) port_name);
+    //
+    ///* XXX: is it really necessary? */
+    ///* all the rings can be used */
+    //rte_spinlock_unlock(&dpdk_ring_a->cring_rx->usable);
+    //rte_spinlock_unlock(&dpdk_ring_a->cring_tx->usable);
+    //rte_spinlock_unlock(&dpdk_ring_b->cring_rx->usable);
+    //rte_spinlock_unlock(&dpdk_ring_b->cring_tx->usable);
 
     /*
     * TODO:
@@ -2694,9 +2699,40 @@ static const struct netdev_class dpdk_ring_class =
         netdev_dpdk_get_status,
         netdev_dpdk_rxq_recv);
 
-static const struct netdev_class dpdk_direct_ring_class =
+/* dpdkrdirect class type 1: rx port is direct */
+static const struct netdev_class dpdk_direct_ring_class1 =
     NETDEV_DPDK_CLASS(
-        "dpdkdirect",
+        "dpdkdirect1",
+        NULL,
+        netdev_dpdk_ring_construct, /* NULL? */
+        netdev_dpdk_destruct,       /* NULL? */
+        netdev_dpdk_set_multiq,
+        netdev_dpdk_ring_send,       /* send */
+        netdev_dpdk_get_carrier,
+        netdev_dpdk_direct_link_get_stats,
+        netdev_dpdk_get_features,
+        netdev_dpdk_get_status,
+        NULL    /* rxq_recv */);
+
+/* dpdkrdirect class type 2: tx port is direct */
+static const struct netdev_class dpdk_direct_ring_class2 =
+    NETDEV_DPDK_CLASS(
+        "dpdkdirect2",
+        NULL,
+        netdev_dpdk_ring_construct, /* NULL? */
+        netdev_dpdk_destruct,       /* NULL? */
+        netdev_dpdk_set_multiq,
+        NULL,       /* send */
+        netdev_dpdk_get_carrier,
+        netdev_dpdk_direct_link_get_stats,
+        netdev_dpdk_get_features,
+        netdev_dpdk_get_status,
+        netdev_dpdk_rxq_recv    /* rxq_recv */);
+
+/* dpdkrdirect class type 3: duplex direct */
+static const struct netdev_class dpdk_direct_ring_class3 =
+    NETDEV_DPDK_CLASS(
+        "dpdkdirect3",
         NULL,
         netdev_dpdk_ring_construct, /* NULL? */
         netdev_dpdk_destruct,       /* NULL? */
@@ -2749,7 +2785,10 @@ netdev_dpdk_register(void)
         dpdk_common_init();
         netdev_register_provider(&dpdk_class);
         netdev_register_provider(&dpdk_ring_class);
-        netdev_register_provider(&dpdk_direct_ring_class);
+        /* special classes for direct links */
+        netdev_register_provider(&dpdk_direct_ring_class1);
+        netdev_register_provider(&dpdk_direct_ring_class2);
+        netdev_register_provider(&dpdk_direct_ring_class3);
 
 #ifdef VHOST_CUSE
         netdev_register_provider(&dpdk_vhost_cuse_class);

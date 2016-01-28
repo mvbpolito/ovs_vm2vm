@@ -3985,6 +3985,8 @@ out:
     return rule;
 }
 
+/**** start of direcvm2vm modifications **/
+
 /* describes a unidirectional path */
 struct u_path {
     struct ovs_list list_node;
@@ -3994,15 +3996,15 @@ struct u_path {
 };
 
 /* describes a bidirectional path */
-struct b_path {
-    struct ovs_list list_node;
-    //struct rule * rule;
-    ofp_port_t port_1;
-    ofp_port_t port_2;
-};
+//struct b_path {
+//    struct ovs_list list_node;
+//    //struct rule * rule;
+//    ofp_port_t port_1;
+//    ofp_port_t port_2;
+//};
 
 
-/* bidiretional direct paths found*/
+/* direct paths found*/
 struct ovs_list direct_paths = OVS_LIST_INITIALIZER(&direct_paths);
 
 static ofp_port_t
@@ -4097,20 +4099,22 @@ rule_outputs_to_port(struct rule * rule, ofp_port_t port)
 }
 
 static bool
-b_paths_equal(struct b_path * a, struct b_path * b)
+u_paths_equal(struct u_path * a, struct u_path * b)
 {
-    bool t1 = a->port_1 == b->port_1 && a->port_2 == b->port_2;
-    bool t2 = a->port_1 == b->port_2 && a->port_2 == b->port_1;
-    return t1 || t2;
+    //bool t1 = a->port_1 == b->port_1 && a->port_2 == b->port_2;
+    //bool t2 = a->port_1 == b->port_2 && a->port_2 == b->port_1;
+    //return t1 || t2;
+
+    return (a->in_port == b->in_port) && (a->out_port == b->out_port);
 }
 
 static bool
-list_contains_b_path(struct ovs_list * list, struct b_path * path)
+list_contains_u_path(struct ovs_list * list, struct u_path * path)
 {
-    struct b_path * path_i;
+    struct u_path * path_i;
     LIST_FOR_EACH(path_i, list_node, list)
     {
-        if(b_paths_equal(path_i, path))
+        if(u_paths_equal(path_i, path))
             return true;
     }
 
@@ -4123,8 +4127,8 @@ direct_paths_update(struct ofproto_dpif * ofproto)
     /* list of unidirectional paths found */
     struct ovs_list u_paths = OVS_LIST_INITIALIZER(&u_paths);
 
-    /* list of bidirectional paths found in this iteration */
-    struct ovs_list b_paths = OVS_LIST_INITIALIZER(&b_paths);
+    ///* list of bidirectional paths found in this iteration */
+    //struct ovs_list b_paths = OVS_LIST_INITIALIZER(&b_paths);
 
     /* first step: look for unidirectional paths */
     struct rule * rule_i;
@@ -4139,14 +4143,14 @@ direct_paths_update(struct ofproto_dpif * ofproto)
         if(is_direct)
         {
             list_push_back(&u_paths, &path->list_node);
-            VLOG_INFO("Found: %d -> %d rule\n",
-                path->in_port, path->out_port);
+            //VLOG_INFO("Found: %d -> %d rule\n",
+            //    path->in_port, path->out_port);
             /* the element was used, request a new one */
             path = malloc(sizeof(*path));
         }
     }
 
-    free(path); /* there always an element unused at the end */
+    free(path); /* there is always an element unused at the end */
 
     /* second and third steps */
     struct u_path * path_i;
@@ -4177,192 +4181,224 @@ direct_paths_update(struct ofproto_dpif * ofproto)
         }
     }
 
-    /* fourth step: build bidirectional paths from unidirectional paths */
+    ///* fourth step: build bidirectional paths from unidirectional paths */
+    //
+    //LIST_FOR_EACH(path_i, list_node, &u_paths)
+    //{
+    //    struct u_path * path_j = path_i;
+    //
+    //    LIST_FOR_EACH_CONTINUE(path_j, list_node, &u_paths)
+    //    {
+    //        if((path_i->in_port == path_j->out_port) &&
+    //            (path_j->in_port == path_i->out_port))
+    //        {
+    //            struct b_path * direct = malloc(sizeof(*direct));
+    //            direct->port_1 = path_i->in_port;
+    //            direct->port_2 = path_j->in_port;
+    //            list_push_back(&b_paths, &direct->list_node);
+    //
+    //            /*VLOG_INFO("Direct path %d <-> %d found\n",
+    //                path_i->in_port, path_j->in_port);*/
+    //        }
+    //    }
+    //}
 
-    LIST_FOR_EACH(path_i, list_node, &u_paths)
-    {
-        struct u_path * path_j = path_i;
-
-        LIST_FOR_EACH_CONTINUE(path_j, list_node, &u_paths)
-        {
-            if((path_i->in_port == path_j->out_port) &&
-                (path_j->in_port == path_i->out_port))
-            {
-                struct b_path * direct = malloc(sizeof(*direct));
-                direct->port_1 = path_i->in_port;
-                direct->port_2 = path_j->in_port;
-                list_push_back(&b_paths, &direct->list_node);
-
-                /*VLOG_INFO("Direct path %d <-> %d found\n",
-                    path_i->in_port, path_j->in_port);*/
-            }
-        }
-    }
-
-    LIST_FOR_EACH_POP(path_i, list_node, &u_paths)
-    {
-        free(path_i);
-        path_i = 0;
-    }
+    //LIST_FOR_EACH_POP(path_i, list_node, &u_paths)
+    //{
+    //    free(path_i);
+    //    path_i = 0;
+    //}
 
     /*
      * check the diferences between the paths found now and the
      * paths found before
      */
 
-    struct b_path * b_path_i;
+    struct u_path * u_path_i;
 
     /*** look for deleted direct paths ***/
-    LIST_FOR_EACH(b_path_i, list_node, &direct_paths)
+    LIST_FOR_EACH(u_path_i, list_node, &direct_paths)
     {
-        if(!list_contains_b_path(&b_paths, b_path_i))
+        if(!list_contains_u_path(&u_paths, u_path_i))
         {
-            VLOG_INFO("Direct path %d <-> %d deleted\n",
-                    b_path_i->port_1, b_path_i->port_2);
-            list_remove(&b_path_i->list_node);
+            VLOG_INFO("Direct path %d -> %d deleted\n",
+                    u_path_i->in_port, u_path_i->out_port);
+            list_remove(&u_path_i->list_node);
 
             /* XXX: when to free(b_path_i) ? */
 
-            odp_port_t odp_port1, odp_port2; /* dapath port numbers */
-            ofp_port_t ofp_port1, ofp_port2; /* open flow port numbers */
-            struct ofport * ofport_1, * ofport_2; /* open flow ports */
+            //odp_port_t odp_port1, odp_port2; /* dapath port numbers */
+            //ofp_port_t ofp_port1, ofp_port2; /* open flow port numbers */
+            //struct ofport * ofport_1, * ofport_2; /* open flow ports */
+            //
+            //ofp_port1 = b_path_i->port_1;
+            //odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
+            //ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
+            //
+            //ofp_port2 = b_path_i->port_2;
+            //odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
+            //ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
+            //
+            //if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkdirect") ||
+            //    strcmp(ofport_2->netdev->netdev_class->type, "dpdkdirect"))
+            //{
+            //    VLOG_INFO("Direct path is not dpdkdirect, ignoring...\n");
+            //    continue;   /* is a direct path, but not between dpdkr */
+            //}
 
-            ofp_port1 = b_path_i->port_1;
-            odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
-            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
-
-            ofp_port2 = b_path_i->port_2;
-            odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
-            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
-
-            if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkdirect") ||
-                strcmp(ofport_2->netdev->netdev_class->type, "dpdkdirect"))
-            {
-                VLOG_INFO("Direct path is not dpdkdirect, ignoring...\n");
-                continue;   /* is a direct path, but not between dpdkr */
-            }
-
-            /* remove ports from datapath */
-            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
-            dpif_port_del(ofproto->backer->dpif, odp_port1);
-
-            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
-            dpif_port_del(ofproto->backer->dpif, odp_port2);
-
-             /* change netdev implementation */
-            struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
-
-            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
-            ofport_1->netdev->n_rxq = 1;
-            ofport_1->netdev->n_txq = 1;
-            ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
-
-            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
-            ofport_2->netdev->n_rxq = 1;
-            ofport_2->netdev->n_txq = 1;
-            ofport_2->netdev->netdev_class = net->class;  /* this too */
-
-            /* add "new" ports to the datapath */
-            odp_port_t odp_port1_ = odp_port1;
-            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
-
-            odp_port_t odp_port2_ = odp_port2;
-            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
-
-            if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
-            {
-                VLOG_ERR("DirectPath: Port numbers have changed\n");
-            }
-
-            /* XXX: Copy old packets to the new rings */
-
-            /* delete direct link */
-            netdev_dpdk_delete_direct_link(ofport_1->netdev->name,
-                                           ofport_2->netdev->name);
+            ///* remove ports from datapath */
+            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
+            //dpif_port_del(ofproto->backer->dpif, odp_port1);
+            //
+            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
+            //dpif_port_del(ofproto->backer->dpif, odp_port2);
+            //
+            // /* change netdev implementation */
+            //struct netdev_registered_class * net = netdev_lookup_class("dpdkr");
+            //
+            //ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
+            //ofport_1->netdev->n_rxq = 1;
+            //ofport_1->netdev->n_txq = 1;
+            //ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
+            //
+            //ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
+            //ofport_2->netdev->n_rxq = 1;
+            //ofport_2->netdev->n_txq = 1;
+            //ofport_2->netdev->netdev_class = net->class;  /* this too */
+            //
+            ///* add "new" ports to the datapath */
+            //odp_port_t odp_port1_ = odp_port1;
+            //dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
+            //
+            //odp_port_t odp_port2_ = odp_port2;
+            //dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
+            //
+            //if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
+            //{
+            //    VLOG_ERR("DirectPath: Port numbers have changed\n");
+            //}
+            //
+            ///* XXX: Copy old packets to the new rings */
+            //
+            ///* delete direct link */
+            //netdev_dpdk_delete_direct_link(ofport_1->netdev->name,
+            //                               ofport_2->netdev->name);
         }
     }
 
     void * opaque;
 
     /*** look for new direct paths ***/
-    LIST_FOR_EACH(b_path_i, list_node, &b_paths)
+    LIST_FOR_EACH(u_path_i, list_node, &u_paths)
     {
-        if(!list_contains_b_path(&direct_paths, b_path_i))
+        if(!list_contains_u_path(&direct_paths, u_path_i))
         {
-            VLOG_INFO("Direct path %d <-> %d added\n",
-                    b_path_i->port_1, b_path_i->port_2);
+            VLOG_INFO("Direct path %d -> %d added\n",
+                    u_path_i->in_port, u_path_i->out_port);
 
-            struct b_path * t = malloc(sizeof(*t));
-            memcpy(t, (b_path_i), sizeof(*t));
+            struct u_path * t = malloc(sizeof(*t));
+            memcpy(t, (u_path_i), sizeof(*t));
             list_push_back(&direct_paths, &t->list_node);
 
-            odp_port_t odp_port1, odp_port2;    /* datapath port numbers */
-            ofp_port_t ofp_port1, ofp_port2;    /* openflow port numbers */
-            struct ofport * ofport_1, * ofport_2;   /* openflow ports */
+            odp_port_t odp_in_port, odp_out_port;    /* datapath port numbers */
+            ofp_port_t ofp_in_port, ofp_out_port;    /* openflow port numbers */
+            struct ofport * ofport_in_port, * ofport_out_port;   /* openflow ports */
 
-            ofp_port1 = b_path_i->port_1;
-            odp_port1 = ofp_port_to_odp_port(ofproto, ofp_port1);
-            ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
+            ofp_in_port = u_path_i->in_port;
+            odp_in_port = ofp_port_to_odp_port(ofproto, ofp_in_port);
+            ofport_in_port = ofproto_get_port(&ofproto->up, ofp_in_port);
 
-            ofp_port2 = b_path_i->port_2;
-            odp_port2 = ofp_port_to_odp_port(ofproto, ofp_port2);
-            ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
+            ofp_out_port = u_path_i->out_port;
+            odp_out_port = ofp_port_to_odp_port(ofproto, ofp_out_port);
+            ofport_out_port = ofproto_get_port(&ofproto->up, ofp_out_port);
+            //
+            //if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkr") ||
+            //    strcmp(ofport_2->netdev->netdev_class->type, "dpdkr"))
+            //{
+            //    VLOG_INFO("Direct path is not dpdkr, ignoring...\n");
+            //    continue;   /* is a direct path, but not between dpdkr */
+            //}
+            //
+            ///* create direct link */
+            netdev_dpdk_create_direct_link(ofport_in_port->netdev->name,
+                                           ofport_out_port->netdev->name, &opaque);
+            //
+            /* remove ports from datapath */
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_in_port, odp_in_port);
+            dpif_port_del(ofproto->backer->dpif, odp_in_port);
+            //
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_out_port, odp_out_port);
+            dpif_port_del(ofproto->backer->dpif, odp_out_port);
 
-            if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkr") ||
-                strcmp(ofport_2->netdev->netdev_class->type, "dpdkr"))
+            /*is the path direct?*/
+            bool fullDirect = false;
+            struct u_path * path_j;
+
+            LIST_FOR_EACH(path_j, list_node, &direct_paths)
             {
-                VLOG_INFO("Direct path is not dpdkr, ignoring...\n");
-                continue;   /* is a direct path, but not between dpdkr */
+                if((path_i->in_port == path_j->out_port) &&
+                    (path_j->in_port == path_i->out_port))
+                {
+                    fullDirect = true;
+                    VLOG_INFO("Direct path %d <-> %d is full direct\n",
+                        path_i->in_port, path_j->in_port);
+                    break;
+                }
             }
 
-            /* create direct link */
-            netdev_dpdk_create_direct_link(ofport_1->netdev->name,
-                                           ofport_2->netdev->name, &opaque);
-
-            /* remove ports from datapath */
-            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
-            dpif_port_del(ofproto->backer->dpif, odp_port1);
-
-            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
-            dpif_port_del(ofproto->backer->dpif, odp_port2);
+            struct netdev_registered_class * class1;
+            struct netdev_registered_class * class2;
 
             /* change netdev implementation */
-            struct netdev_registered_class * net = netdev_lookup_class("dpdkdirect");
+            if(!fullDirect) {
+                class1 = netdev_lookup_class("dpdkdirect1");
+                class2 = netdev_lookup_class("dpdkdirect2");
 
-            netdev_ref(ofport_1->netdev); /* XXX: IT IS A WORKAROUND */
-            netdev_ref(ofport_2->netdev); /* XXX: IT IS A WORKAROUND */
+                ofport_in_port->netdev->n_rxq = 0;
+                ofport_in_port->netdev->netdev_class = class1->class;   /* this hurts my eyes */
 
-            ofport_1->netdev->n_rxq = 0;
-            ofport_1->netdev->n_txq = 0;
-            ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
+                ofport_out_port->netdev->n_txq = 0;
+                ofport_out_port->netdev->netdev_class = class2->class;  /* this too */
 
-            ofport_2->netdev->n_rxq = 0;
-            ofport_2->netdev->n_txq = 0;
-            ofport_2->netdev->netdev_class = net->class;  /* this too */
+            } else {
+                class1 = netdev_lookup_class("dpdkdirect3");
+                class2 = netdev_lookup_class("dpdkdirect3");
+
+                ofport_in_port->netdev->n_rxq = 0;
+                ofport_in_port->netdev->n_txq = 0;
+                ofport_in_port->netdev->netdev_class = class1->class;   /* this hurts my eyes */
+
+                ofport_out_port->netdev->n_rxq = 0;
+                ofport_out_port->netdev->n_txq = 0;
+                ofport_out_port->netdev->netdev_class = class2->class;  /* this too */
+            }
+            //
+            //netdev_ref(ofport_1->netdev); /* XXX: IT IS A WORKAROUND */
+            //netdev_ref(ofport_2->netdev); /* XXX: IT IS A WORKAROUND */
 
             /* add "new" ports to the datapath */
-            odp_port_t odp_port1_ = odp_port1;
-            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
+            odp_port_t odp_in_port_ = odp_in_port;
+            dpif_port_add(ofproto->backer->dpif, ofport_in_port->netdev, &odp_in_port_);
 
-            odp_port_t odp_port2_ = odp_port2;
-            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
+            odp_port_t odp_out_port_ = odp_out_port;
+            dpif_port_add(ofproto->backer->dpif, ofport_out_port->netdev, &odp_out_port_);
 
-            if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
+            if((odp_in_port != odp_in_port_) || (odp_out_port != odp_out_port_))
             {
                 VLOG_ERR("DirectPath: Port numbers have changed\n");
             }
-
-            /* XXX: Copy old packets to the new rings */
-
-            /* tell the application that rings are available to use */
+            //
+            ///* XXX: Copy old packets to the new rings */
+            //
+            ///* tell the application that rings are available to use */
             netdev_dpdk_start_direct_link(opaque);
         }
     }
 
-    LIST_FOR_EACH_POP(b_path_i, list_node, &b_paths)
+    LIST_FOR_EACH_POP(u_path_i, list_node, &u_paths)
     {
-        free(b_path_i);
-        b_path_i = 0;
+        free(u_path_i);
+        u_path_i = 0;
     }
 
 

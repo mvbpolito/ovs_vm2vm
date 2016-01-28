@@ -109,8 +109,11 @@ netdev_n_rxq(const struct netdev *netdev)
 bool
 netdev_is_pmd(const struct netdev *netdev)
 {
+    /* dpdkrdirect2 is pmd because of it is possible to get packets from that
+     * port, it means, it is necessary to pool its rx queues */
     return (!strcmp(netdev->netdev_class->type, "dpdk") ||
             !strcmp(netdev->netdev_class->type, "dpdkr") ||
+            !strcmp(netdev->netdev_class->type, "dpdkdirect2") ||
             !strcmp(netdev->netdev_class->type, "dpdkvhostcuse") ||
             !strcmp(netdev->netdev_class->type, "dpdkvhostuser"));
 }
