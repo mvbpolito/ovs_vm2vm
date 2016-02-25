@@ -2720,6 +2720,7 @@ static const struct dpdk_qos_ops egress_policer_ops = {
     NULL,                       /* arp_lookup */              \
                                                               \
     netdev_dpdk_update_flags,                                 \
+    NULL,                       /* reconfigure */             \
                                                               \
     netdev_dpdk_rxq_alloc,                                    \
     netdev_dpdk_rxq_construct,                                \

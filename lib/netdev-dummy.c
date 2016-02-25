@@ -1275,6 +1275,7 @@ static const struct netdev_class dummy_class = {
     NULL,                       /* arp_lookup */
 
     netdev_dummy_update_flags,
+    NULL,                       /* reconfigure */
 
     netdev_dummy_rxq_alloc,
     netdev_dummy_rxq_construct,

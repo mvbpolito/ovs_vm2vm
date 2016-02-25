@@ -1528,6 +1528,7 @@ netdev_vport_range(struct unixctl_conn *conn, int argc,
     NULL,                       /* arp_lookup */            \
                                                             \
     netdev_vport_update_flags,                              \
+    NULL,                       /* reconfigure */           \
                                                             \
     NULL,                   /* rx_alloc */                  \
     NULL,                   /* rx_construct */              \
