@@ -1488,7 +1488,7 @@ netdev_vport_range(struct unixctl_conn *conn, int argc,
     PUSH_HEADER,                                            \
     POP_HEADER,                                             \
     NULL,                       /* get_numa_id */           \
-    NULL,                       /* set_multiq */            \
+    NULL,                       /* set_tx_multiq */         \
                                                             \
     NULL,                       /* send */                  \
     NULL,                       /* send_wait */             \
