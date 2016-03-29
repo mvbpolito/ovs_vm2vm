@@ -1027,4 +1027,7 @@ ovs_be32 ovsinst_bitmap_to_openflow(uint32_t ovsinst_bitmap, enum ofp_version);
 uint32_t ovsinst_bitmap_from_openflow(ovs_be32 ofpit_bitmap,
                                       enum ofp_version);
 
+bool
+ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port);
+
 #endif /* ofp-actions.h */

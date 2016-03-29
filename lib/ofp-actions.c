@@ -7250,7 +7250,7 @@ ofpact_bitmap_format(uint64_t ofpacts_bitmap, struct ds *s)
 }
 
 /* Returns true if 'action' outputs to 'port', false otherwise. */
-static bool
+bool
 ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
 {
     switch (ofpact->type) {
