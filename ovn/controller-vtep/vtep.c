@@ -279,9 +279,8 @@ vtep_macs_run(struct ovsdb_idl_txn *vtep_idl_txn, struct shash *ucast_macs_rmts,
     SHASH_FOR_EACH (node, ucast_macs_rmts) {
         vteprec_ucast_macs_remote_delete(node->data);
     }
-    struct ls_hash_node *iter, *next;
-    HMAP_FOR_EACH_SAFE (iter, next, hmap_node, &ls_map) {
-        hmap_remove(&ls_map, &iter->hmap_node);
+    struct ls_hash_node *iter;
+    HMAP_FOR_EACH_POP (iter, hmap_node, &ls_map) {
         shash_destroy(&iter->added_macs);
         free(iter);
     }
