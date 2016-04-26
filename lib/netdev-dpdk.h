@@ -11,6 +11,7 @@ struct dp_packet;
 #include <rte_eal.h>
 #include <rte_debug.h>
 #include <rte_ethdev.h>
+#include <rte_ivshmem.h>
 #include <rte_eth_ring.h>
 #include <rte_errno.h>
 #include <rte_memzone.h>
@@ -26,6 +27,9 @@ int dpdk_init(int argc, char **argv);
 void netdev_dpdk_register(void);
 void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
+
+int
+netdev_dpdk_create_direct_link(char * devname_a, char * devname_b, void ** opaque);
 
 #else
 

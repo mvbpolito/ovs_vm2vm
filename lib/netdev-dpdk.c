@@ -102,6 +102,29 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 #define NIC_PORT_RX_Q_SIZE 2048  /* Size of Physical NIC RX Queue, Max (n+32<=4096)*/
 #define NIC_PORT_TX_Q_SIZE 2048  /* Size of Physical NIC TX Queue, Max (n+32<=4096)*/
 
+#define DIRECT_LINK_NAME_FORMAT "ring_%d_%d"
+#define PORT_NAME_FORMAT "port_%d_%d"
+
+#define UNIVERSAL_NODE_ADDRESS "127.0.0.1"
+#define UNIVERSAL_NODE_PORT     8080
+#define UNIVERSAL_NODE_URL_ATTACH "/attach/"
+#define UNIVERSAL_NODE_URL_DETACH "/detach/"
+#define UNIVERSAL_NODE_URL_SEND_DPDK "/send_dpdk/"
+
+#define PLUG_PORT_JSON_FORMAT  "{ \n"                   \
+                               "\"port\":\"%s\",\n"     \
+                               "\"id\":\"%s\",\n"        \
+                               "\"type\":\"%s\",\n"      \
+                               "\"device\":\"%s\"\n"    \
+                               "}"
+
+#define DPDK_SEND_JSON_FORMAT  "{ \n"                   \
+                               "\"port\":\"%s\",\n"     \
+                               "\"command\":\"%s\"\n"   \
+                               "}"
+
+#define CHANGE_PORTS_JSON_FORMAT "old=%s,new=%s"
+
 #define OVS_VHOST_MAX_QUEUE_NUM 1024  /* Maximum number of vHost TX queues. */
 
 static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
@@ -291,6 +314,17 @@ struct dpdk_ring {
     struct rte_ring *cring_rx;
     unsigned int user_port_id; /* User given port no, parsed from port name */
     int eth_port_id; /* ethernet device port id */
+    struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
+};
+
+static struct ovs_list dpdk_direct_link_list OVS_GUARDED_BY(dpdk_mutex)
+    = OVS_LIST_INITIALIZER(&dpdk_direct_link_list);
+
+struct dpdk_direct_link {
+    unsigned int port_numbers[2];
+    struct rte_ring * rings[2];
+    struct dpdk_ring * dpdk_rings[2];
+    char medatadatas[2][IVSHMEM_NAME_LEN];
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
 };
 
@@ -1925,6 +1959,341 @@ netdev_dpdk_get_status(const struct netdev *netdev_, struct smap *args)
     return 0;
 }
 
+static int
+write_to_orchestrator(const char * buf, char * answer)
+{
+    int sd;
+    struct sockaddr_in serv_addr;
+    int n;
+    const char * buf_ptr;
+
+    sd = socket(AF_INET, SOCK_STREAM, 0);
+    if(sd < 0)
+    {
+        VLOG_ERR("Error creating socket\n");
+        return -1;
+    }
+
+    memset((void *)&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+
+    if(inet_pton(AF_INET, UNIVERSAL_NODE_ADDRESS, &serv_addr.sin_addr) <= 0) {
+        VLOG_ERR("Error converting UniversalNode Address\n");
+        return -1;
+    }
+
+    serv_addr.sin_port = htons(UNIVERSAL_NODE_PORT);
+
+    if(connect(sd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        VLOG_ERR("Error connecting to UniversalNode\n");
+        return -1;
+    }
+
+    n = strlen(buf);
+    buf_ptr = &buf[0];
+    do {
+        int ret = write(sd, buf_ptr, n);
+        if(ret < 0) {
+            VLOG_ERR("Error sending data over socket to UniversalNode\n");
+            return -1;
+        }
+
+        n -= ret;
+        buf_ptr += ret;
+    } while(n > 0);
+
+    char * ans_ptr = answer;
+    char total = 0;
+    do {
+        int n = read(sd, ans_ptr, 1024 - total);
+        if(n < 0)
+            break;
+        ans_ptr += n;
+        total += n;
+    } while(n != 0);
+
+    close(sd);
+
+    return 0;
+}
+
+/* XXX:
+ * this function is totally unsafe, there is not any length check, then buffer
+ * overflows are possible everywhere
+ */
+static int
+send_command_to_vm(const char *url, const char *cmd, char *answer) {
+
+    char buf[4096] = {0};   /* quite big due to the overhead of http and json */
+    char tmp[1024] = {0};
+    int err;
+    int httpr;
+
+    snprintf(tmp, 1024, "PUT %s HTTP/1.1\r\n", url);
+    strncat(buf, tmp, 1024);
+
+    snprintf(tmp, 1024, "Host: %s:%hu\r\n", UNIVERSAL_NODE_ADDRESS, UNIVERSAL_NODE_PORT);
+    strncat(buf, tmp, 1024);
+
+    strcat(buf, "Connection: close\r\n");
+    strcat(buf, "Accept: */*\r\n");
+
+    snprintf(tmp, 1024, "Content-Length: %"PRIuSIZE"\r\n", strlen(cmd));
+    strncat(buf, tmp, 1024);
+
+    strcat(buf, "Content-Type: application/json\r\n\r\n");
+
+    strncat(buf, cmd, 1024);
+
+    err = write_to_orchestrator(buf, tmp);
+    if(err)
+        return err;
+
+    printf("server answered: %s\n", tmp);
+
+    sscanf(tmp, "HTTP/1.1 %d", &httpr);
+    if(httpr != 200)
+        return -1;
+
+    if(answer != NULL) {
+        /* find the body */
+        char * p = strstr(tmp, "\r\n\r\n") + 4;
+        strcpy(answer, p);
+    }
+    return 0;
+}
+
+static int
+plug_device(const char *port, const char *id,
+                const char *device, char *pci_addr, int type)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, PLUG_PORT_JSON_FORMAT, port, id,
+        type == 0 ? "ivshmem" : "pci_assign", device);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_ATTACH, json, pci_addr);
+}
+
+static int
+plug_ivshmem_device(const char *port, const char *id,
+    const char *cmdline_, char *pci_addr)
+{
+    /* remove first part of the command */
+    const char * cmdline = strchr(cmdline_, ',') + 1;
+    return plug_device(port, id, cmdline, pci_addr, 0);
+}
+
+static int
+send_dpdk_command(const char *port, const char *command)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, DPDK_SEND_JSON_FORMAT, port, command);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_SEND_DPDK, json, NULL);
+}
+
+static int
+request_change_ports(const char * port, const char *old, const char *new)
+{
+    char command[50];
+
+    snprintf(command, sizeof(command), CHANGE_PORTS_JSON_FORMAT, old, new);
+
+    return send_dpdk_command(port, command);
+}
+
+int
+netdev_dpdk_create_direct_link(char *devname_a, char *devname_b, void **opaque)
+{
+    VLOG_INFO("Creating direct dpdkr link %s <-> %s\n", devname_a, devname_b);
+
+    int err;
+    unsigned int a_, b_;
+
+    struct dpdk_direct_link * direct_link;
+    struct rte_ring * ring_a_b, * ring_b_a;
+    struct dpdk_ring * dpdk_ring_a = NULL, * dpdk_ring_b = NULL;
+    char cmdline[512];
+    char pci_addr[30];
+
+    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
+    if(err) {
+        VLOG_INFO("Invalid device name: %s\n", devname_a);
+        return -1;
+    }
+
+    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
+    if(err){
+        VLOG_INFO("Invalid device name: %s\n", devname_b);
+        return -1;
+    }
+    /* ports that are directly connected */
+    int a = a_; //MIN(a_, b_);
+    int b = b_; //MAX(a_, b_);
+
+    char ring_name[RTE_RING_NAMESIZE];
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+
+    ovs_assert(a != b);
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    /* sanity check: is there another link that uses this ports? */
+    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+        if (direct_link->port_numbers[0] == a ||
+            direct_link->port_numbers[1] == b) {
+            VLOG_INFO("A direct link using this ports already exists!\n");
+            goto error_unlock;
+        }
+    }
+
+    /* sanity check: do exist this ports? */
+    struct dpdk_ring * ring;
+    LIST_FOR_EACH(ring, list_node, &dpdk_ring_list) {
+        if(ring->user_port_id == a)
+            dpdk_ring_a = ring;
+
+        if(ring->user_port_id == b)
+            dpdk_ring_b = ring;
+
+        if(dpdk_ring_a && dpdk_ring_b)
+            break;
+    }
+
+    if(dpdk_ring_a == NULL || dpdk_ring_b == NULL) {
+        VLOG_ERR("Ports do not exist\n");
+        goto error_unlock;
+    }
+
+    /* Ports exist and are not used withing another direct link */
+    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
+
+    direct_link->port_numbers[0] = a;
+    direct_link->port_numbers[1] = b;
+
+    direct_link->dpdk_rings[0] = dpdk_ring_a;
+    direct_link->dpdk_rings[1] = dpdk_ring_b;
+
+    /* lookup for ring a to b, if does not exist create it */
+    snprintf(ring_name, sizeof(ring_name), DIRECT_LINK_NAME_FORMAT, a, b);
+    ring_a_b = rte_ring_lookup(ring_name);
+    if(ring_a_b == NULL)
+        ring_a_b = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if(ring_a_b == NULL){
+        rte_free(direct_link);
+        return ENOMEM;
+    }
+
+    direct_link->rings[0] = ring_a_b;
+
+    /* lookup for ring b to a, if does not exist create it */
+    snprintf(ring_name, sizeof(ring_name), DIRECT_LINK_NAME_FORMAT, b, a);
+    ring_b_a = rte_ring_lookup(ring_name);
+    if(ring_b_a == NULL)
+        ring_b_a = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if(ring_b_a == NULL) {
+        rte_free(direct_link);
+        return ENOMEM;
+    }
+
+    direct_link->rings[1] = ring_b_a;
+
+    /* create first ivshmem with a ring pmd inside */
+
+    snprintf(port_name, sizeof(port_name), PORT_NAME_FORMAT, a, b);
+
+    err = rte_ivshmem_metadata_create(port_name);
+    if(err) {
+        VLOG_ERR("Error creating metadata: '%s'", port_name);
+        return err;
+    }
+
+    err = rte_ivshmem_metadata_add_pmd_ring(port_name,
+                                        &ring_b_a, 1, &ring_a_b, 1, port_name);
+    if(err) {
+        VLOG_ERR("Error adding pmd '%s'", port_name);
+        return err;
+    }
+
+    err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
+    if(err) {
+        VLOG_ERR("Error creating command line for '%s'", port_name);
+        return err;
+    }
+
+    err = plug_ivshmem_device(devname_a, port_name, cmdline, pci_addr);
+    if(err) {
+        VLOG_ERR("Error plugging port '%s'", port_name);
+        return err;
+    }
+
+    /* XXX: port parameter should always refer to the orignal port name */
+    err = request_change_ports(devname_a, devname_a, pci_addr);
+    if(err) {
+        VLOG_ERR("Error requesting changing ports");
+        return err;
+    }
+
+    /* create second ivshmem with a ring pmd inside */
+
+    snprintf(port_name, sizeof(port_name), PORT_NAME_FORMAT, b, a);
+
+    err = rte_ivshmem_metadata_create(port_name);
+    if(err) {
+        VLOG_ERR("Error creating metadata: '%s'", port_name);
+        return err;
+    }
+
+    err = rte_ivshmem_metadata_add_pmd_ring(port_name,
+                                        &ring_a_b, 1, &ring_b_a, 1, port_name);
+    if(err) {
+        VLOG_ERR("Error adding pmd '%s'", port_name);
+        return err;
+    }
+
+    err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
+    if(err) {
+        VLOG_ERR("Error creating command line for '%s'", port_name);
+        return err;
+    }
+
+    err = plug_ivshmem_device(devname_b, port_name, cmdline, pci_addr);
+    if(err) {
+        VLOG_ERR("Error plugging port '%s'", port_name);
+        return err;
+    }
+
+    /* XXX: port parameter should always refer to the orignal port name */
+    err = request_change_ports(devname_b, devname_b, pci_addr);
+    if(err) {
+        VLOG_ERR("Error requesting changing ports");
+        return err;
+    }
+
+    list_push_back(&dpdk_direct_link_list, &direct_link->list_node);
+
+    /*
+     * TODO:
+     * Think about locks, are additional locks required?
+     * Many more thing surely
+     */
+
+    if(opaque != NULL)
+        *opaque = direct_link;
+
+    ovs_mutex_unlock(&dpdk_mutex);
+    return 0;
+
+    rte_free(direct_link);
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    return -1;
+}
+
 static void
 netdev_dpdk_set_admin_state__(struct netdev_dpdk *dev, bool admin_state)
     OVS_REQUIRES(dev->mutex)
@@ -2640,11 +3009,11 @@ static const struct dpdk_qos_ops egress_policer_ops = {
     egress_policer_run
 };
 
-#define NETDEV_DPDK_CLASS(NAME, INIT, CONSTRUCT, DESTRUCT, MULTIQ, SEND, \
+#define NETDEV_DPDK_CLASS(NAME, IS_PMD, INIT, CONSTRUCT, DESTRUCT, MULTIQ, SEND, \
     GET_CARRIER, GET_STATS, GET_FEATURES, GET_STATUS, RXQ_RECV)          \
 {                                                             \
     NAME,                                                     \
-    true,                       /* is_pmd */                  \
+    IS_PMD,                       /* is_pmd */                  \
     INIT,                       /* init */                    \
     NULL,                       /* netdev_dpdk_run */         \
     NULL,                       /* netdev_dpdk_wait */        \
@@ -2810,6 +3179,7 @@ dpdk_init(int argc, char **argv)
 static const struct netdev_class dpdk_class =
     NETDEV_DPDK_CLASS(
         "dpdk",
+        true,
         NULL,
         netdev_dpdk_construct,
         netdev_dpdk_destruct,
@@ -2824,6 +3194,7 @@ static const struct netdev_class dpdk_class =
 static const struct netdev_class dpdk_ring_class =
     NETDEV_DPDK_CLASS(
         "dpdkr",
+        true,
         NULL,
         netdev_dpdk_ring_construct,
         netdev_dpdk_destruct,
@@ -2838,6 +3209,7 @@ static const struct netdev_class dpdk_ring_class =
 static const struct netdev_class OVS_UNUSED dpdk_vhost_cuse_class =
     NETDEV_DPDK_CLASS(
         "dpdkvhostcuse",
+        true,
         dpdk_vhost_cuse_class_init,
         netdev_dpdk_vhost_cuse_construct,
         netdev_dpdk_vhost_destruct,
@@ -2852,6 +3224,7 @@ static const struct netdev_class OVS_UNUSED dpdk_vhost_cuse_class =
 static const struct netdev_class OVS_UNUSED dpdk_vhost_user_class =
     NETDEV_DPDK_CLASS(
         "dpdkvhostuser",
+        true,
         dpdk_vhost_user_class_init,
         netdev_dpdk_vhost_user_construct,
         netdev_dpdk_vhost_destruct,
@@ -2862,6 +3235,21 @@ static const struct netdev_class OVS_UNUSED dpdk_vhost_user_class =
         NULL,
         NULL,
         netdev_dpdk_vhost_rxq_recv);
+
+static const struct netdev_class dpdk_direct_ring_class =
+    NETDEV_DPDK_CLASS(
+        "dpdkdirect",
+        false,
+        NULL,
+        netdev_dpdk_ring_construct, /* NULL? */
+        netdev_dpdk_destruct,       /* NULL? */
+        netdev_dpdk_set_multiq,
+        NULL,       /* send */
+        netdev_dpdk_get_carrier,
+        NULL,
+        netdev_dpdk_get_features,
+        netdev_dpdk_get_status,
+        NULL    /* rxq_recv */);
 
 void
 netdev_dpdk_register(void)
@@ -2876,6 +3264,7 @@ netdev_dpdk_register(void)
         dpdk_common_init();
         netdev_register_provider(&dpdk_class);
         netdev_register_provider(&dpdk_ring_class);
+        netdev_register_provider(&dpdk_direct_ring_class);
 #ifdef VHOST_CUSE
         netdev_register_provider(&dpdk_vhost_cuse_class);
 #else

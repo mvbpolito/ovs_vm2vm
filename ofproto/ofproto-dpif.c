@@ -3419,6 +3419,7 @@ list_contains_b_path(struct ovs_list * list, struct b_path * path)
 static void
 direct_paths_update(struct ofproto_dpif * ofproto)
 {
+    int err;
     /* list of unidirectional paths found */
     struct ovs_list u_paths = OVS_LIST_INITIALIZER(&u_paths);
 
@@ -3535,7 +3536,7 @@ direct_paths_update(struct ofproto_dpif * ofproto)
             ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
 
             if(strcmp(ofport_1->netdev->netdev_class->type, "dpdkdirect") ||
-                strcmp(ofport_2->netdev->netdev_class->type, "dpdkdirect"))
+               strcmp(ofport_2->netdev->netdev_class->type, "dpdkdirect"))
             {
                 VLOG_INFO("Direct path is not dpdkdirect, ignoring...\n");
                 continue;   /* is a direct path, but not between dpdkr */
@@ -3614,47 +3615,54 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                 continue;   /* is a direct path, but not between dpdkr */
             }
 
-            ///* create direct link */
-            //netdev_dpdk_create_direct_link(ofport_1->netdev->name,
-            //                               ofport_2->netdev->name, &opaque);
-            //
-            ///* remove ports from datapath */
-            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
-            //dpif_port_del(ofproto->backer->dpif, odp_port1);
-            //
-            //VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
-            //dpif_port_del(ofproto->backer->dpif, odp_port2);
-            //
-            ///* change netdev implementation */
-            //struct netdev_registered_class * net = netdev_lookup_class("dpdkdirect");
-            //
-            //netdev_ref(ofport_1->netdev); /* XXX: IT IS A WORKAROUND */
-            //netdev_ref(ofport_2->netdev); /* XXX: IT IS A WORKAROUND */
-            //
-            //ofport_1->netdev->n_rxq = 0;
-            //ofport_1->netdev->n_txq = 0;
-            //ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
-            //
-            //ofport_2->netdev->n_rxq = 0;
-            //ofport_2->netdev->n_txq = 0;
-            //ofport_2->netdev->netdev_class = net->class;  /* this too */
-            //
-            ///* add "new" ports to the datapath */
-            //odp_port_t odp_port1_ = odp_port1;
-            //dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
-            //
-            //odp_port_t odp_port2_ = odp_port2;
-            //dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
-            //
-            //if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
-            //{
-            //    VLOG_ERR("DirectPath: Port numbers have changed\n");
-            //}
-            //
-            ///* XXX: Copy old packets to the new rings */
-            //
-            ///* tell the application that rings are available to use */
-            //netdev_dpdk_start_direct_link(opaque);
+            /* create direct link */
+            err = netdev_dpdk_create_direct_link(ofport_1->netdev->name,
+                                           ofport_2->netdev->name, &opaque);
+
+            if(err) {
+                VLOG_ERR("failed to create direct link...\n");
+                return;
+            }
+
+            /* remove ports from datapath */
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port1, odp_port1);
+            dpif_port_del(ofproto->backer->dpif, odp_port1);
+
+            VLOG_INFO("Deleting port (of: %d), (dp: %d)\n", ofp_port2, odp_port2);
+            dpif_port_del(ofproto->backer->dpif, odp_port2);
+
+            /* change netdev implementation */
+            struct netdev_registered_class * net = netdev_lookup_class("dpdkdirect");
+
+            if(!net) {
+                VLOG_ERR("DirectPath: Error finding dpdkdirect netclass\n");
+                return;
+            }
+
+            netdev_ref(ofport_1->netdev); /* XXX: IT IS A WORKAROUND */
+            netdev_ref(ofport_2->netdev); /* XXX: IT IS A WORKAROUND */
+
+            ofport_1->netdev->n_rxq = 0;
+            ofport_1->netdev->n_txq = 0;
+            ofport_1->netdev->netdev_class = net->class;   /* this hurts my eyes */
+
+            ofport_2->netdev->n_rxq = 0;
+            ofport_2->netdev->n_txq = 0;
+            ofport_2->netdev->netdev_class = net->class;  /* this too */
+
+            /* add "new" ports to the datapath */
+            odp_port_t odp_port1_ = odp_port1;
+            dpif_port_add(ofproto->backer->dpif, ofport_1->netdev, &odp_port1_);
+
+            odp_port_t odp_port2_ = odp_port2;
+            dpif_port_add(ofproto->backer->dpif, ofport_2->netdev, &odp_port2_);
+
+            if((odp_port1 != odp_port1_) || (odp_port2 != odp_port2_))
+            {
+                VLOG_ERR("DirectPath: Port numbers have changed\n");
+            }
+
+            /* XXX: Copy old packets to the new rings */
         }
     }
 
