@@ -125,6 +125,9 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 
 #define CHANGE_PORTS_JSON_FORMAT "old=%s,new=%s"
 
+#define ADD_SLAVE_FORMAT "action=add,old=%s,new=%s"
+#define DEL_SLAVE_FORMAT "action=del,old=%s"
+
 #define OVS_VHOST_MAX_QUEUE_NUM 1024  /* Maximum number of vHost TX queues. */
 
 static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
@@ -2095,11 +2098,21 @@ send_dpdk_command(const char *port, const char *command)
 }
 
 static int
-request_change_ports(const char * port, const char *old, const char *new)
+request_add_slave(const char * port, const char *old, const char *new)
 {
     char command[50];
 
-    snprintf(command, sizeof(command), CHANGE_PORTS_JSON_FORMAT, old, new);
+    snprintf(command, sizeof(command), ADD_SLAVE_FORMAT, old, new);
+
+    return send_dpdk_command(port, command);
+}
+
+static int
+request_remove_slave(const char * port, const char *old)
+{
+    char command[50];
+
+    snprintf(command, sizeof(command), DEL_SLAVE_FORMAT, old);
 
     return send_dpdk_command(port, command);
 }
@@ -2232,7 +2245,7 @@ netdev_dpdk_create_direct_link(char *devname_a, char *devname_b, void **opaque)
     }
 
     /* XXX: port parameter should always refer to the orignal port name */
-    err = request_change_ports(devname_a, devname_a, pci_addr);
+    err = request_add_slave(devname_a, devname_a, pci_addr);
     if(err) {
         VLOG_ERR("Error requesting changing ports");
         return err;
@@ -2268,7 +2281,7 @@ netdev_dpdk_create_direct_link(char *devname_a, char *devname_b, void **opaque)
     }
 
     /* XXX: port parameter should always refer to the orignal port name */
-    err = request_change_ports(devname_b, devname_b, pci_addr);
+    err = request_add_slave(devname_b, devname_b, pci_addr);
     if(err) {
         VLOG_ERR("Error requesting changing ports");
         return err;
