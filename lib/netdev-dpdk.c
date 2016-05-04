@@ -111,12 +111,17 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 #define UNIVERSAL_NODE_URL_DETACH "/detach/"
 #define UNIVERSAL_NODE_URL_SEND_DPDK "/send_dpdk/"
 
-#define PLUG_PORT_JSON_FORMAT  "{ \n"                   \
-                               "\"port\":\"%s\",\n"     \
-                               "\"id\":\"%s\",\n"        \
-                               "\"type\":\"%s\",\n"      \
-                               "\"device\":\"%s\"\n"    \
+#define PLUG_PORT_JSON_FORMAT  "{ \n"                       \
+                               "\"port\":\"%s\",\n"         \
+                               "\"id\":\"%s\",\n"           \
+                               "\"type\":\"%s\",\n"         \
+                               "\"device\":\"%s\"\n"        \
                                "}"
+
+#define UNPLUG_PORT_JSON_FORMAT     "{ \n"                      \
+                                    "\"port\":\"%s\",\n"        \
+                                    "\"id\":\"%s\",\n"          \
+                                    "}"
 
 #define DPDK_SEND_JSON_FORMAT  "{ \n"                   \
                                "\"port\":\"%s\",\n"     \
@@ -2079,6 +2084,16 @@ plug_device(const char *port, const char *id,
 }
 
 static int
+unplug_device(const char *port, const char *id)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, UNPLUG_PORT_JSON_FORMAT, port, id);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_DETACH, json, NULL);
+}
+
+static int
 plug_ivshmem_device(const char *port, const char *id,
     const char *cmdline_, char *pci_addr)
 {
@@ -2118,7 +2133,86 @@ request_remove_slave(const char * port, const char *old)
 }
 
 int
-netdev_dpdk_create_direct_link(char *devname_a, char *devname_b, void **opaque)
+netdev_dpdk_delete_direct_link(char *devname_a, char *devname_b)
+{
+    VLOG_INFO("Deleting direct dpdkr link %s <-> %s\n", devname_a, devname_b);
+
+    int err;
+    unsigned int a_, b_;
+    struct dpdk_direct_link * direct_link;
+    /* original ports */
+    struct dpdk_ring * dpdk_ring_a;
+    struct dpdk_ring * dpdk_ring_b;
+    char cmdline[PATH_MAX];
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+
+    err = dpdk_dev_parse_name(devname_a, "dpdkr", &a_);
+    if (err) {
+        VLOG_INFO("Invalid device name: %s\n", devname_a);
+        return -1;
+    }
+
+    err = dpdk_dev_parse_name(devname_b, "dpdkr", &b_);
+    if (err) {
+        VLOG_INFO("Invalid device name: %s\n", devname_b);
+        return -1;
+    }
+
+    /* ports that are directly connected */
+    int a = a_;//MIN(a_, b_);
+    int b = b_;//MAX(a_, b_);
+
+    ovs_assert(a != b);
+
+    bool found = false;
+
+    LIST_FOR_EACH (direct_link, list_node, &dpdk_direct_link_list) {
+        if (direct_link->port_numbers[0] == a &&
+            direct_link->port_numbers[1] == b) {
+            list_remove(&direct_link->list_node);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        VLOG_INFO("Direct link %d <-> %d not found\n", a, b);
+        return -1;
+    }
+
+    /* remove first slave device */
+    snprintf(port_name, sizeof(port_name), PORT_NAME_FORMAT, a, b);
+    err = request_remove_slave(devname_a, port_name);
+    if(err) {
+        VLOG_ERR("Error removing device: '%s'", port_name);
+        return err;
+    }
+
+    //err = unplug_device(devname_a, port_name);
+    //if(err) {
+    //    VLOG_ERR("Error unplugging device: '%s'", port_name);
+    //    return err;
+    //}
+
+    /* remove second slave device */
+    snprintf(port_name, sizeof(port_name), PORT_NAME_FORMAT, b, a);
+    err = request_remove_slave(devname_b, port_name);
+    if(err) {
+        VLOG_ERR("Error removing device: '%s'", port_name);
+        return err;
+    }
+
+    //err = unplug_device(devname_b, port_name);
+    //if(err) {
+    //    VLOG_ERR("Error unplugging device: '%s'", port_name);
+    //    return err;
+    //}
+
+    return 0;
+}
+
+int
+netdev_dpdk_create_direct_link(char *devname_a, char *devname_b)
 {
     VLOG_INFO("Creating direct dpdkr link %s <-> %s\n", devname_a, devname_b);
 
@@ -2294,9 +2388,6 @@ netdev_dpdk_create_direct_link(char *devname_a, char *devname_b, void **opaque)
      * Think about locks, are additional locks required?
      * Many more thing surely
      */
-
-    if(opaque != NULL)
-        *opaque = direct_link;
 
     ovs_mutex_unlock(&dpdk_mutex);
     return 0;
