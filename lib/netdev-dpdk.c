@@ -1661,46 +1661,46 @@ netdev_dpdk_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
 }
 
 static int
-netdev_dpdk_get_features(const struct netdev *netdev,
+netdev_dpdk_get_features(const struct netdev *netdev_,
                          enum netdev_features *current,
                          enum netdev_features *advertised OVS_UNUSED,
                          enum netdev_features *supported OVS_UNUSED,
                          enum netdev_features *peer OVS_UNUSED)
 {
-    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev_);
     struct rte_eth_link link;
 
     ovs_mutex_lock(&dev->mutex);
     link = dev->link;
     ovs_mutex_unlock(&dev->mutex);
 
-    if (link.link_duplex == ETH_LINK_HALF_DUPLEX) {
-        if (link.link_speed == ETH_SPEED_NUM_10M) {
+    if (link.link_duplex == ETH_LINK_AUTONEG_DUPLEX) {
+        if (link.link_speed == ETH_LINK_SPEED_AUTONEG) {
+            *current = NETDEV_F_AUTONEG;
+        }
+    } else if (link.link_duplex == ETH_LINK_HALF_DUPLEX) {
+        if (link.link_speed == ETH_LINK_SPEED_10) {
             *current = NETDEV_F_10MB_HD;
         }
-        if (link.link_speed == ETH_SPEED_NUM_100M) {
+        if (link.link_speed == ETH_LINK_SPEED_100) {
             *current = NETDEV_F_100MB_HD;
         }
-        if (link.link_speed == ETH_SPEED_NUM_1G) {
+        if (link.link_speed == ETH_LINK_SPEED_1000) {
             *current = NETDEV_F_1GB_HD;
         }
     } else if (link.link_duplex == ETH_LINK_FULL_DUPLEX) {
-        if (link.link_speed == ETH_SPEED_NUM_10M) {
+        if (link.link_speed == ETH_LINK_SPEED_10) {
             *current = NETDEV_F_10MB_FD;
         }
-        if (link.link_speed == ETH_SPEED_NUM_100M) {
+        if (link.link_speed == ETH_LINK_SPEED_100) {
             *current = NETDEV_F_100MB_FD;
         }
-        if (link.link_speed == ETH_SPEED_NUM_1G) {
+        if (link.link_speed == ETH_LINK_SPEED_1000) {
             *current = NETDEV_F_1GB_FD;
         }
-        if (link.link_speed == ETH_SPEED_NUM_10G) {
+        if (link.link_speed == ETH_LINK_SPEED_10000) {
             *current = NETDEV_F_10GB_FD;
         }
-    }
-
-    if (link.link_autoneg) {
-        *current |= NETDEV_F_AUTONEG;
     }
 
     return 0;
