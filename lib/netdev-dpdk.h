@@ -11,6 +11,7 @@ struct dp_packet;
 #include <rte_eal.h>
 #include <rte_debug.h>
 #include <rte_ethdev.h>
+#include <rte_ivshmem.h>
 #include <rte_eth_ring.h>
 #include <rte_errno.h>
 #include <rte_memzone.h>
@@ -20,6 +21,8 @@ struct dp_packet;
 #include <rte_launch.h>
 #include <rte_malloc.h>
 
+#include "netdev-provider.h"
+
 #define NON_PMD_CORE_ID LCORE_ID_ANY
 
 int dpdk_init(int argc, char **argv);
@@ -27,6 +30,8 @@ void netdev_dpdk_register(void);
 void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
 
+int netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_);
+int netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_);
 #else
 
 #define NON_PMD_CORE_ID UINT32_MAX

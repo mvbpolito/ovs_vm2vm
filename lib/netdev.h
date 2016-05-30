@@ -21,6 +21,7 @@
 #include "openvswitch/types.h"
 #include "packets.h"
 #include "flow.h"
+#include "smap.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -243,9 +244,18 @@ int netdev_get_queue_stats(const struct netdev *, unsigned int queue_id,
                            struct netdev_queue_stats *);
 uint64_t netdev_get_change_seq(const struct netdev *);
 
+
 int netdev_reconfigure(struct netdev *netdev);
 void netdev_wait_reconf_required(struct netdev *netdev);
 bool netdev_is_reconf_required(struct netdev *netdev);
+
+struct netdev_registered_class {
+    /* In 'netdev_classes', by class->type. */
+    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
+    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
+    /* Number of 'struct netdev's of this class. */
+    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
+};
 
 struct netdev_queue_dump {
     struct netdev *netdev;
@@ -257,6 +267,8 @@ void netdev_queue_dump_start(struct netdev_queue_dump *,
 bool netdev_queue_dump_next(struct netdev_queue_dump *,
                             unsigned int *queue_id, struct smap *details);
 int netdev_queue_dump_done(struct netdev_queue_dump *);
+
+struct netdev_registered_class * netdev_lookup_class(const char *type);
 
 /* Iterates through each queue in NETDEV, using DUMP as state.  Fills QUEUE_ID
  * and DETAILS with information about queues.  The client must initialize and

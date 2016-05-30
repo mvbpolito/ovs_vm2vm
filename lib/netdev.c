@@ -47,7 +47,6 @@
 #include "poll-loop.h"
 #include "seq.h"
 #include "shash.h"
-#include "smap.h"
 #include "sset.h"
 #include "svec.h"
 #include "openvswitch/vlog.h"
@@ -86,14 +85,6 @@ static struct ovs_mutex netdev_class_mutex OVS_ACQ_BEFORE(netdev_mutex);
 /* Contains 'struct netdev_registered_class'es. */
 static struct hmap netdev_classes OVS_GUARDED_BY(netdev_class_mutex)
     = HMAP_INITIALIZER(&netdev_classes);
-
-struct netdev_registered_class {
-    /* In 'netdev_classes', by class->type. */
-    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
-    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
-    /* Number of 'struct netdev's of this class. */
-    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
-};
 
 /* This is set pretty low because we probably won't learn anything from the
  * additional log messages. */
@@ -204,7 +195,7 @@ netdev_wait(void)
     ovs_mutex_unlock(&netdev_class_mutex);
 }
 
-static struct netdev_registered_class *
+struct netdev_registered_class *
 netdev_lookup_class(const char *type)
     OVS_REQ_RDLOCK(netdev_class_mutex)
 {
@@ -657,6 +648,11 @@ int
 netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **pkts, int *cnt)
 {
     int retval;
+
+    if(unlikely(rx->netdev->netdev_class->rxq_recv == NULL)) {
+        *cnt = 0;
+        return 0;   /* MVB */
+    }
 
     retval = rx->netdev->netdev_class->rxq_recv(rx, pkts, cnt);
     if (!retval) {

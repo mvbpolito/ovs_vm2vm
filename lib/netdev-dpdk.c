@@ -35,7 +35,6 @@
 #include "dpif-netdev.h"
 #include "fatal-signal.h"
 #include "netdev-dpdk.h"
-#include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "odp-util.h"
 #include "openvswitch/list.h"
@@ -101,6 +100,37 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
 
 #define NIC_PORT_RX_Q_SIZE 2048  /* Size of Physical NIC RX Queue, Max (n+32<=4096)*/
 #define NIC_PORT_TX_Q_SIZE 2048  /* Size of Physical NIC TX Queue, Max (n+32<=4096)*/
+
+#define DIRECT_LINK_NAME_FORMAT "ring_%d_%d"
+#define DIRECT_PORT_NAME_FORMAT "port_%d_%d"
+
+#define UNIVERSAL_NODE_ADDRESS "127.0.0.1"
+#define UNIVERSAL_NODE_PORT     8080
+#define UNIVERSAL_NODE_URL_ATTACH "/attach/"
+#define UNIVERSAL_NODE_URL_DETACH "/detach/"
+#define UNIVERSAL_NODE_URL_SEND_DPDK "/send_dpdk/"
+
+#define PLUG_PORT_JSON_FORMAT  "{ \n"                       \
+                               "\"port\":\"%s\",\n"         \
+                               "\"id\":\"%s\",\n"           \
+                               "\"type\":\"%s\",\n"         \
+                               "\"device\":\"%s\"\n"        \
+                               "}"
+
+#define UNPLUG_PORT_JSON_FORMAT     "{ \n"                      \
+                                    "\"port\":\"%s\",\n"        \
+                                    "\"id\":\"%s\",\n"          \
+                                    "}"
+
+#define DPDK_SEND_JSON_FORMAT  "{ \n"                   \
+                               "\"port\":\"%s\",\n"     \
+                               "\"command\":\"%s\"\n"   \
+                               "}"
+
+#define CHANGE_PORTS_JSON_FORMAT "old=%s,new=%s"
+
+#define ADD_SLAVE_FORMAT "action=add,old=%s,new=%s"
+#define DEL_SLAVE_FORMAT "action=del,old=%s"
 
 #define OVS_VHOST_MAX_QUEUE_NUM 1024  /* Maximum number of vHost TX queues. */
 #define OVS_VHOST_QUEUE_MAP_UNKNOWN (-1) /* Mapping not initialized. */
@@ -288,12 +318,18 @@ struct dpdk_tx_queue {
 static struct ovs_list dpdk_ring_list OVS_GUARDED_BY(dpdk_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_ring_list);
 
+struct dpdkr_direct_link {
+    struct rte_ring *rings[2];  /* rte_rings that communicates both VMs */
+};
+
 struct dpdk_ring {
     /* For the client rings */
     struct rte_ring *cring_tx;
     struct rte_ring *cring_rx;
     unsigned int user_port_id; /* User given port no, parsed from port name */
     int eth_port_id; /* ethernet device port id */
+    struct pmd_internals *internals; /* pmd_internals structure on the guest */
+    struct dpdkr_direct_link * direct;  /* if set, the port is direct */
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
 };
 
@@ -526,6 +562,34 @@ dpdk_watchdog(void *dummy OVS_UNUSED)
         }
         ovs_mutex_unlock(&dpdk_mutex);
         xsleep(DPDK_PORT_WATCHDOG_INTERVAL);
+    }
+
+    return NULL;
+}
+
+static struct dpdk_ring *
+look_dpdkr_for_port_no(unsigned int port_no)
+{
+    struct dpdk_ring *ring;
+    /* look through our list to find the device */
+    LIST_FOR_EACH (ring, list_node, &dpdk_ring_list) {
+         if (ring->user_port_id == port_no) {
+            return ring;
+         }
+    }
+
+    return NULL;
+}
+
+static struct dpdk_ring *
+look_dpdkr_for_port_id(int port_id)
+{
+    struct dpdk_ring *ring;
+    /* look through our list to find the device */
+    LIST_FOR_EACH (ring, list_node, &dpdk_ring_list) {
+         if (ring->eth_port_id == port_id) {
+            return ring;
+         }
     }
 
     return NULL;
@@ -1659,6 +1723,73 @@ netdev_dpdk_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
 
     return 0;
 }
+static int
+netdev_dpdk_ring_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    struct dpdk_ring *ring;
+
+    ring = look_dpdkr_for_port_id(dev->port_id);
+
+    /*
+     * if the ring is not direct then get the local stats
+     */
+    if (!ring->direct)
+        return netdev_dpdk_get_stats(netdev, stats);
+
+    ovs_mutex_lock(&dev->mutex);
+
+    struct pmd_internals *internal = ring->internals;
+
+    memset(stats, 0, sizeof(*stats));
+
+    unsigned i;
+    unsigned long rx_total = 0, tx_total = 0, tx_err_total = 0;
+
+    for (i = 0; i < internal->nb_rx_queues; i++) {
+        rx_total += internal->rx_ring_queues[i].rx_pkts;
+    }
+
+    for (i = 0; i < internal->nb_tx_queues; i++) {
+        tx_total += internal->tx_ring_queues[i].tx_pkts;
+        tx_err_total += internal->tx_ring_queues[i].err_pkts;
+    }
+
+    /*
+     * Currently statistics are taken from the same side of the port,
+     * would it make sense to take them from the other side?
+     */
+    stats->tx_packets = rx_total;
+    stats->rx_packets = tx_total;
+    stats->rx_bytes = UINT64_MAX;   /* XXX: to be done */
+    stats->tx_bytes = UINT64_MAX;   /* XXX: to be done */
+
+    stats->tx_errors = UINT64_MAX;
+    stats->rx_errors = tx_err_total;
+    stats->multicast = UINT64_MAX;
+    stats->tx_dropped = UINT64_MAX;
+
+    stats->rx_dropped = UINT64_MAX;
+    stats->collisions = UINT64_MAX;
+
+    stats->rx_length_errors = UINT64_MAX;
+    stats->rx_over_errors = UINT64_MAX;
+    stats->rx_crc_errors = UINT64_MAX;
+    stats->rx_frame_errors = UINT64_MAX;
+    stats->rx_fifo_errors = UINT64_MAX;
+    stats->rx_missed_errors = UINT64_MAX;
+
+    stats->tx_aborted_errors = UINT64_MAX;
+    stats->tx_carrier_errors = UINT64_MAX;
+    stats->tx_fifo_errors = UINT64_MAX;
+    stats->tx_heartbeat_errors = UINT64_MAX;
+    stats->tx_window_errors = UINT64_MAX;
+
+    ovs_mutex_unlock(&dev->mutex);
+
+    return 0;
+}
+
 
 static int
 netdev_dpdk_get_features(const struct netdev *netdev_,
@@ -1862,6 +1993,527 @@ netdev_dpdk_get_status(const struct netdev *netdev, struct smap *args)
     return 0;
 }
 
+static int
+write_to_orchestrator(const char * buf, char * answer)
+{
+    int sd;
+    struct sockaddr_in serv_addr;
+    int n;
+    const char * buf_ptr;
+
+    sd = socket(AF_INET, SOCK_STREAM, 0);
+    if(sd < 0)
+    {
+        VLOG_ERR("Error creating socket\n");
+        return -1;
+    }
+
+    memset((void *)&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+
+    if(inet_pton(AF_INET, UNIVERSAL_NODE_ADDRESS, &serv_addr.sin_addr) <= 0) {
+        VLOG_ERR("Error converting UniversalNode Address\n");
+        return -1;
+    }
+
+    serv_addr.sin_port = htons(UNIVERSAL_NODE_PORT);
+
+    if(connect(sd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        VLOG_ERR("Error connecting to UniversalNode\n");
+        return -1;
+    }
+
+    n = strlen(buf);
+    buf_ptr = &buf[0];
+    do {
+        int ret = write(sd, buf_ptr, n);
+        if(ret < 0) {
+            VLOG_ERR("Error sending data over socket to UniversalNode\n");
+            return -1;
+        }
+
+        n -= ret;
+        buf_ptr += ret;
+    } while(n > 0);
+
+    char * ans_ptr = answer;
+    char total = 0;
+    do {
+        int n = read(sd, ans_ptr, 1024 - total);
+        if(n < 0)
+            break;
+        ans_ptr += n;
+        total += n;
+    } while(n != 0);
+
+    close(sd);
+
+    return 0;
+}
+
+/* XXX:
+ * this function is totally unsafe, there is not any length check, then buffer
+ * overflows are possible everywhere
+ */
+static int
+send_command_to_vm(const char *url, const char *cmd, char *answer) {
+
+    char buf[4096] = {0};   /* quite big due to the overhead of http and json */
+    char tmp[1024] = {0};
+    int err;
+    int httpr;
+
+    snprintf(tmp, 1024, "PUT %s HTTP/1.1\r\n", url);
+    strncat(buf, tmp, 1024);
+
+    snprintf(tmp, 1024, "Host: %s:%hu\r\n", UNIVERSAL_NODE_ADDRESS, UNIVERSAL_NODE_PORT);
+    strncat(buf, tmp, 1024);
+
+    strcat(buf, "Connection: close\r\n");
+    strcat(buf, "Accept: */*\r\n");
+
+    snprintf(tmp, 1024, "Content-Length: %"PRIuSIZE"\r\n", strlen(cmd));
+    strncat(buf, tmp, 1024);
+
+    strcat(buf, "Content-Type: application/json\r\n\r\n");
+
+    strncat(buf, cmd, 1024);
+
+    err = write_to_orchestrator(buf, tmp);
+    if(err)
+        return err;
+
+    printf("server answered: %s\n", tmp);
+
+    sscanf(tmp, "HTTP/1.1 %d", &httpr);
+    if(httpr != 200)
+        return -1;
+
+    if(answer != NULL) {
+        /* find the body */
+        char * p = strstr(tmp, "\r\n\r\n") + 4;
+        strcpy(answer, p);
+    }
+    return 0;
+}
+
+static int
+plug_device(const char *port, const char *id,
+                const char *device, char *pci_addr, int type)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, PLUG_PORT_JSON_FORMAT, port, id,
+        type == 0 ? "ivshmem" : "pci_assign", device);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_ATTACH, json, pci_addr);
+}
+
+static int
+unplug_device(const char *port, const char *id)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, UNPLUG_PORT_JSON_FORMAT, port, id);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_DETACH, json, NULL);
+}
+
+static int
+plug_ivshmem_device(const char *port, const char *id,
+    const char *cmdline_, char *pci_addr)
+{
+    /* remove first part of the command */
+    const char * cmdline = strchr(cmdline_, ',') + 1;
+    return plug_device(port, id, cmdline, pci_addr, 0);
+}
+
+static int
+send_dpdk_command(const char *port, const char *command)
+{
+    char json[1024] = {0};
+
+    snprintf(json, 1024, DPDK_SEND_JSON_FORMAT, port, command);
+
+    return send_command_to_vm(UNIVERSAL_NODE_URL_SEND_DPDK, json, NULL);
+}
+
+static int
+request_add_slave(const char * port, const char *old, const char *new)
+{
+    char command[50];
+
+    snprintf(command, sizeof(command), ADD_SLAVE_FORMAT, old, new);
+
+    return send_dpdk_command(port, command);
+}
+
+static int
+request_remove_slave(const char * port, const char *old)
+{
+    char command[50];
+
+    snprintf(command, sizeof(command), DEL_SLAVE_FORMAT, old);
+
+    return send_dpdk_command(port, command);
+}
+
+struct direct_args {
+    struct netdev *dev1;
+    struct netdev *dev2;
+};
+
+static void *
+netdev_dpdk_delete_direct_link_thread(void *args_)
+{
+    struct direct_args args = *((struct direct_args *) args_);
+    free(args_);
+
+    struct netdev_dpdk *dev1 = netdev_dpdk_cast(args.dev1);
+    struct netdev_dpdk *dev2 = netdev_dpdk_cast(args.dev2);
+    struct dpdk_ring *dpdk_ring1, *dpdk_ring2;
+    struct dpdkr_direct_link *direct_link;
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+    int i, err;
+
+    VLOG_INFO("Deleting direct dpdkr link %s <-> %s\n",
+                dev1->up.name, dev2->up.name);
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    /* look for the ports */
+    dpdk_ring1 = look_dpdkr_for_port_id(dev1->port_id);
+    ovs_assert(dpdk_ring1);
+
+    dpdk_ring2 = look_dpdkr_for_port_id(dev2->port_id);
+    ovs_assert(dpdk_ring2);
+
+    /* check that the ports are not already in direct mode */
+    if (!dpdk_ring1->direct) {
+        VLOG_ERR("Port '%s' is not direct\n", dev1->up.name);
+        goto error_unlock;
+    }
+
+    if (!dpdk_ring2->direct) {
+        VLOG_ERR("Port '%s' is not direct\n", dev2->up.name);
+        goto error_unlock;
+    }
+
+    /* restarts PMD threads.
+     * Important: current implementation of ovs does not stops the pmd threads even
+     * if they have no queues to poll, then the PMDs are actually not stopped.
+     */
+    dev1->requested_n_rxq = 1;
+    netdev_request_reconfigure(&dev1->up);
+
+    dev2->requested_n_rxq = 1;
+    netdev_request_reconfigure(&dev2->up);
+
+    ovs_mutex_unlock(&dpdk_mutex);
+
+    /* remove first slave device */
+    err = request_remove_slave(dev1->up.name, dev1->up.name);
+    if (err) {
+        VLOG_ERR("Error removing device: '%s'", dev1->up.name);
+        goto error_unlock;
+    }
+
+    /* remove second slave device */
+    err = request_remove_slave(dev2->up.name, dev2->up.name);
+    if (err) {
+        VLOG_ERR("Error removing device: '%s'", dev2->up.name);
+        goto error_unlock;
+    }
+
+    /* wait until ports are in normal mode, then unplug slave devices */
+    for (i = 0; i < 5; i++) {
+        if (dpdk_ring1->internals->bypass_state == BYPASS_DETACHED &&
+            dpdk_ring2->internals->bypass_state == BYPASS_DETACHED) {
+
+            VLOG_INFO("Devices are in normal mode\n");
+
+            snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dev1->port_id, dev2->port_id);
+            err = unplug_device(dev1->up.name, port_name);
+            if (err) {
+                VLOG_ERR("Error unplugging device: '%s'", port_name);
+                goto error_unlock;
+            }
+
+            err = rte_ivshmem_metadata_remove(port_name);
+            if (err) {
+                VLOG_ERR("Error removing metadata: '%s'", port_name);
+                goto error_unlock;
+            }
+
+            snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dev2->port_id, dev1->port_id);
+            err = unplug_device(dev2->up.name, port_name);
+            if (err) {
+                VLOG_ERR("Error unplugging device: '%s'", port_name);
+                goto error_unlock;
+            }
+
+            err = rte_ivshmem_metadata_remove(port_name);
+            if (err) {
+                VLOG_ERR("Error removing metadata: '%s'", port_name);
+                goto error_unlock;
+            }
+
+            direct_link = dpdk_ring1->direct;
+
+            rte_ring_free(direct_link->rings[0]);
+            rte_ring_free(direct_link->rings[1]);
+            rte_free(direct_link);
+            dpdk_ring1->direct = NULL;
+            dpdk_ring2->direct = NULL;
+
+            break;
+        }
+
+        xsleep(1);
+    }
+
+    return NULL;
+
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    //return err;
+    return NULL;
+}
+
+int
+netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_)
+{
+    pthread_t tid;
+    pthread_attr_t attr;
+
+    struct direct_args *args = malloc(sizeof(*args));
+    args->dev1 = dev1_;
+    args->dev2 = dev2_;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    pthread_create(&tid, &attr, netdev_dpdk_delete_direct_link_thread,
+                    (void *)args);
+
+    return 0;
+}
+
+static void *
+netdev_dpdk_create_direct_link_thread(void *args_)
+{
+    struct direct_args args = *((struct direct_args *) args_);
+    free(args_);
+
+    struct netdev_dpdk *dev1 = netdev_dpdk_cast(args.dev1);
+    struct netdev_dpdk *dev2 = netdev_dpdk_cast(args.dev2);
+
+    int err;
+
+    struct dpdkr_direct_link *direct_link;
+    struct rte_ring *ring_1_2, *ring_2_1;
+    struct dpdk_ring *dpdk_ring1, *dpdk_ring2;
+    char cmdline[512];
+    char pci_addr[30];
+
+    /* ports that are directly connected */
+
+    char ring_name[RTE_RING_NAMESIZE];
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+
+    int i;
+
+    VLOG_INFO("Creating direct dpdkr link %s <-> %s\n",
+                dev1->up.name, dev2->up.name);
+
+    ovs_assert(dev1 != dev2);
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    /* look for the ports */
+    dpdk_ring1 = look_dpdkr_for_port_id(dev1->port_id);
+    ovs_assert(dpdk_ring1);
+
+    dpdk_ring2 = look_dpdkr_for_port_id(dev2->port_id);
+    ovs_assert(dpdk_ring2);
+
+    /* check that the ports are not already in direct mode */
+    if (dpdk_ring1->direct) {
+        VLOG_ERR("Port '%s' is already direct\n", dev1->up.name);
+        goto error_unlock;
+    }
+
+    if (dpdk_ring2->direct) {
+        VLOG_ERR("Port '%s' is already direct\n", dev2->up.name);
+        goto error_unlock;
+    }
+
+    /* Ports exist and are not used within any other direct link */
+    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
+    dpdk_ring1->direct = direct_link;
+    dpdk_ring2->direct = direct_link;
+
+    /* create direct links */
+    snprintf(ring_name, sizeof(ring_name), DIRECT_LINK_NAME_FORMAT,
+                dev1->port_id, dev2->port_id);
+    ring_1_2 = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (ring_1_2 == NULL) {
+        rte_free(direct_link);
+        goto error_unlock;
+    }
+
+    snprintf(ring_name, sizeof(ring_name), DIRECT_LINK_NAME_FORMAT,
+                dev2->port_id, dev1->port_id);
+    ring_2_1 = rte_ring_create(ring_name, DPDK_RING_SIZE, SOCKET0,
+                            RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (ring_2_1 == NULL) {
+        rte_free(direct_link);
+        goto error_unlock;
+    }
+
+    direct_link->rings[0] = ring_1_2;
+    direct_link->rings[1] = ring_2_1;
+
+    /* create first ivshmem with a ring pmd inside */
+
+    snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dev1->port_id, dev2->port_id);
+
+    err = rte_ivshmem_metadata_create(port_name);
+    if (err) {
+        VLOG_ERR("Error creating metadata: '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = rte_ivshmem_metadata_add_pmd_ring(port_name,
+                                        &ring_2_1, 1, &ring_1_2, 1, port_name);
+    if (err) {
+        VLOG_ERR("Error adding pmd '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
+    if (err) {
+        VLOG_ERR("Error creating command line for '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = plug_ivshmem_device(dev1->up.name, port_name, cmdline, pci_addr);
+    if (err) {
+        VLOG_ERR("Error plugging port '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    /* create second ivshmem with a ring pmd inside */
+
+    snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dev2->port_id, dev1->port_id);
+
+    err = rte_ivshmem_metadata_create(port_name);
+    if (err) {
+        VLOG_ERR("Error creating metadata: '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = rte_ivshmem_metadata_add_pmd_ring(port_name,
+                                        &ring_1_2, 1, &ring_2_1, 1, port_name);
+    if (err) {
+        VLOG_ERR("Error adding pmd '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
+    if (err) {
+        VLOG_ERR("Error creating command line for '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    err = plug_ivshmem_device(dev2->up.name, port_name, cmdline, pci_addr);
+    if (err) {
+        VLOG_ERR("Error plugging port '%s'", port_name);
+        //return err;
+        return NULL;
+    }
+
+    /* add slaves */
+    err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr);
+    if (err) {
+        VLOG_ERR("Error requesting changing ports");
+        //return err;
+        return NULL;
+    }
+
+    err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr);
+    if (err) {
+        VLOG_ERR("Error requesting changing ports");
+        //return err;
+        return NULL;
+    }
+
+    ovs_mutex_unlock(&dpdk_mutex);
+
+    /* XXX: is it necessary to have a lock for this loop? */
+
+    /* wait until ports are in bypass mode, then set the number of rx queues to
+     * 0, it means that no pmd thread will pool that ports.
+     */
+    for (i = 0; i < 5; i++) {
+        if (dpdk_ring1->internals->mode == MODE_BYPASS &&
+            dpdk_ring2->internals->mode == MODE_BYPASS) {
+
+            VLOG_INFO("Devices are in bypass mode\n");
+
+            dev1->requested_n_rxq = 0;
+            netdev_request_reconfigure(&dev1->up);
+
+            dev2->requested_n_rxq = 0;
+            netdev_request_reconfigure(&dev2->up);
+
+            break;
+        }
+
+        xsleep(1);
+    }
+
+    //return 0;
+    return NULL;
+
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    //return -1;
+    return NULL;
+}
+
+int
+netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_)
+{
+    pthread_t tid;
+    pthread_attr_t attr;
+
+    struct direct_args *args = malloc(sizeof(*args));
+    args->dev1 = dev1_;
+    args->dev2 = dev2_;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    pthread_create(&tid, &attr, netdev_dpdk_create_direct_link_thread,
+                    (void *)args);
+
+    return 0;
+
+}
+
 static void
 netdev_dpdk_set_admin_state__(struct netdev_dpdk *dev, bool admin_state)
     OVS_REQUIRES(dev->mutex)
@@ -1917,6 +2569,42 @@ netdev_dpdk_set_admin_state(struct unixctl_conn *conn, int argc,
         ovs_mutex_unlock(&dpdk_mutex);
     }
     unixctl_command_reply(conn, "OK");
+}
+
+static void
+netdev_dpdk_get_dpdkr_cmdline(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                            const char *argv[], void *aux OVS_UNUSED)
+{
+    int err;
+    unsigned int port_id;
+    struct dpdk_ring *ring;
+    char cmdline[1024];
+
+    err = dpdk_dev_parse_name(argv[1], "dpdkr", &port_id);
+    if (err) {
+        unixctl_command_reply_error(conn, "Invalid Port");
+        return;
+    }
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    /* look for the ports */
+    ring = look_dpdkr_for_port_no(port_id);
+    if (!ring) {
+        ovs_mutex_unlock(&dpdk_mutex);
+        unixctl_command_reply_error(conn, "Invalid Port");
+        return;
+    }
+
+    err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), argv[1]);
+    if (err) {
+        ovs_mutex_unlock(&dpdk_mutex);
+        unixctl_command_reply_error(conn, "Error creating command line");
+        return;
+    }
+
+    ovs_mutex_unlock(&dpdk_mutex);
+    unixctl_command_reply(conn, cmdline);
 }
 
 /*
@@ -2221,6 +2909,10 @@ dpdk_common_init(void)
                              "[netdev] up|down", 1, 2,
                              netdev_dpdk_set_admin_state, NULL);
 
+    unixctl_command_register("netdev-dpdk/get-cmdline",
+                             "port", 1, 1,
+                             netdev_dpdk_get_dpdkr_cmdline, NULL);
+
     ovs_thread_create("dpdk_watchdog", dpdk_watchdog, NULL);
 }
 
@@ -2274,6 +2966,23 @@ dpdk_ring_create(const char dev_name[], unsigned int port_no,
         return ENODEV;
     }
 
+    /* create ivshmem metadata file for this port */
+    err = rte_ivshmem_metadata_create(dev_name);
+    if (err) {
+        VLOG_ERR("Error creating metadata: '%s'", dev_name);
+        return err;
+    }
+
+    err = rte_ivshmem_metadata_add_pmd_ring(dev_name, &ivshmem->cring_tx, 1,
+                                    &ivshmem->cring_rx, 1, dev_name);
+    if (err) {
+        VLOG_ERR("Error adding pmd '%s'", dev_name);
+        return err;
+    }
+
+    ivshmem->internals = rte_ivshmem_metadata_get_pmd_internals(dev_name, dev_name);
+
+    ivshmem->direct = NULL; /* this port is not direct */
     ivshmem->user_port_id = port_no;
     ivshmem->eth_port_id = rte_eth_dev_count() - 1;
     ovs_list_push_back(&dpdk_ring_list, &ivshmem->list_node);
@@ -2862,7 +3571,7 @@ static const struct netdev_class dpdk_ring_class =
         netdev_dpdk_destruct,
         netdev_dpdk_ring_send,
         netdev_dpdk_get_carrier,
-        netdev_dpdk_get_stats,
+        netdev_dpdk_ring_get_stats,
         netdev_dpdk_get_features,
         netdev_dpdk_get_status,
         netdev_dpdk_reconfigure,
