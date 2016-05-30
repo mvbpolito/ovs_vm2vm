@@ -103,6 +103,12 @@ struct rule_dpif {
      * The recirculation id and associated internal flow should
      * be freed when the rule is freed */
     uint32_t recirc_id;
+
+    /* Assigned to a port when rule is a direct path */
+    struct ofport_dpif *ofport;
+    uint64_t n_packets_offset;
+    uint64_t n_bytes_offset;
+    long long int used_offset;
 };
 
 /* RULE_CAST() depends on this. */
@@ -3287,6 +3293,7 @@ set_mcast_snooping_port(struct ofproto *ofproto_, void *aux,
 /* describes a unidirectional path */
 struct u_path {
     struct ovs_list list_node;
+    struct rule_dpif *rule;
     ofp_port_t in_port;
     ofp_port_t out_port;
 };
@@ -3294,6 +3301,8 @@ struct u_path {
 /* describes a bidirectional path */
 struct b_path {
     struct ovs_list list_node;
+    struct rule_dpif *rule1;
+    struct rule_dpif *rule2;
     ofp_port_t port_1;
     ofp_port_t port_2;
 };
@@ -3373,6 +3382,7 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
     {
         path->in_port = in_port;
         path->out_port = out_port;
+        path->rule = rule_dpif_cast(rule);
     }
 
     return true;
@@ -3421,6 +3431,8 @@ create_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
     ofp_port_t ofp_port1, ofp_port2;        /* openflow port numbers */
     struct ofport * ofport_1, * ofport_2;   /* openflow ports */
 
+    struct netdev_stats stats;
+
     ofp_port1 = b_path->port_1;
     ofport_1 = ofproto_get_port(&ofproto->up, ofp_port1);
 
@@ -3434,10 +3446,39 @@ create_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
         return -1;
     }
 
-    /*
-     * with the new implementation it is not necessary to remove the port nor
-     * change its implementation. It is really a good thing!
-     */
+    /* XXX: remove rules from datapath */
+
+    ovs_mutex_lock(&b_path->rule1->stats_mutex);
+
+    err = netdev_get_stats(ofport_1->netdev, &stats);
+    if (err) {
+        return -1;
+    }
+
+    b_path->rule1->n_bytes_offset =
+        b_path->rule1->stats.n_bytes - stats.rx_bytes;
+    b_path->rule1->n_packets_offset =
+        b_path->rule1->stats.n_packets - stats.rx_packets;
+
+    b_path->rule1->ofport = ofport_dpif_cast(ofport_1);
+
+    ovs_mutex_unlock(&b_path->rule1->stats_mutex);
+
+    ovs_mutex_lock(&b_path->rule2->stats_mutex);
+
+    err = netdev_get_stats(ofport_2->netdev, &stats);
+    if (err) {
+        return -1;
+    }
+
+    b_path->rule2->n_bytes_offset =
+        b_path->rule2->stats.n_bytes - stats.rx_bytes;
+    b_path->rule2->n_packets_offset =
+        b_path->rule2->stats.n_packets - stats.rx_packets;
+
+    b_path->rule2->ofport = ofport_dpif_cast(ofport_2);
+
+    ovs_mutex_unlock(&b_path->rule2->stats_mutex);
 
     return 0;
 }
@@ -3454,6 +3495,41 @@ remove_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
 
     ofp_port2 = b_path->port_2;
     ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
+
+    struct rule_dpif *rule1 = b_path->rule1;
+    struct rule_dpif *rule2 = b_path->rule2;
+
+    struct netdev_stats stats;
+
+    /* XXX: reinsert rules to dapath */
+
+    ovs_mutex_lock(&rule1->stats_mutex);
+
+    err = netdev_get_stats(ofport_1->netdev, &stats);
+    if (err) {
+        return -1;
+    }
+
+    rule1->stats.n_bytes = rule1->n_bytes_offset + stats.rx_bytes;
+    rule1->stats.n_packets = rule1->n_packets_offset + stats.rx_packets;
+
+    rule1->ofport = NULL;
+
+    ovs_mutex_unlock(&rule1->stats_mutex);
+
+    ovs_mutex_lock(&rule2->stats_mutex);
+
+    err = netdev_get_stats(ofport_2->netdev, &stats);
+    if (err) {
+        return -1;
+    }
+
+    rule2->stats.n_bytes = rule2->n_bytes_offset + stats.rx_bytes;
+    rule2->stats.n_packets = rule2->n_packets_offset + stats.rx_packets;
+
+    rule2->ofport = NULL;
+
+    ovs_mutex_unlock(&rule2->stats_mutex);
 
     /* delete direct link */
     err = netdev_dpdk_delete_direct_link(ofport_1->netdev, ofport_2->netdev);
@@ -3537,7 +3613,9 @@ direct_paths_update(struct ofproto_dpif * ofproto)
                 (path_j->in_port == path_i->out_port))
             {
                 struct b_path * direct = malloc(sizeof(*direct));
+                direct->rule1 =  path_i->rule;
                 direct->port_1 = path_i->in_port;
+                direct->rule2 =  path_j->rule;
                 direct->port_2 = path_j->in_port;
                 ovs_list_push_back(&b_paths, &direct->list_node);
 
@@ -4511,9 +4589,19 @@ rule_get_stats(struct rule *rule_, uint64_t *packets, uint64_t *bytes,
     if (OVS_UNLIKELY(rule->new_rule)) {
         rule_get_stats(&rule->new_rule->up, packets, bytes, used);
     } else {
-        *packets = rule->stats.n_packets;
-        *bytes = rule->stats.n_bytes;
-        *used = rule->stats.used;
+        if (rule->ofport) {
+            struct netdev_stats stats;
+            int error = netdev_get_stats(rule->ofport->up.netdev, &stats);
+            if (!error) {
+                *packets = stats.rx_packets + rule->n_packets_offset;
+                *bytes = stats.rx_bytes + rule->n_bytes_offset;
+                *used = rule->used_offset; /* no idea what is it */
+            }
+        } else {
+            *packets = rule->stats.n_packets;
+            *bytes = rule->stats.n_bytes;
+            *used = rule->stats.used;
+        }
     }
     ovs_mutex_unlock(&rule->stats_mutex);
 }
