@@ -1723,19 +1723,14 @@ netdev_dpdk_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
 
     return 0;
 }
-static int
-netdev_dpdk_ring_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
+
+int netdev_dpdk_get_bypass_stats(const struct netdev *netdev,
+                                    struct netdev_stats *stats)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     struct dpdk_ring *ring;
 
     ring = look_dpdkr_for_port_id(dev->port_id);
-
-    /*
-     * if the ring is not direct then get the local stats
-     */
-    if (!ring->direct)
-        return netdev_dpdk_get_stats(netdev, stats);
 
     ovs_mutex_lock(&dev->mutex);
 
@@ -1744,15 +1739,15 @@ netdev_dpdk_ring_get_stats(const struct netdev *netdev, struct netdev_stats *sta
     memset(stats, 0, sizeof(*stats));
 
     unsigned i;
-    unsigned long rx_total = 0, tx_total = 0, tx_err_total = 0;
+    uint64_t rx_total = 0, tx_total = 0, tx_err_total = 0;
 
     for (i = 0; i < internal->nb_rx_queues; i++) {
-        rx_total += internal->rx_ring_queues[i].rx_pkts;
+        rx_total += internal->rx_ring_queues[i].rx_pkts_bypass;
     }
 
     for (i = 0; i < internal->nb_tx_queues; i++) {
-        tx_total += internal->tx_ring_queues[i].tx_pkts;
-        tx_err_total += internal->tx_ring_queues[i].err_pkts;
+        tx_total += internal->tx_ring_queues[i].tx_pkts_bypass;
+        tx_err_total += internal->tx_ring_queues[i].err_pkts_bypass;
     }
 
     /*
@@ -1787,6 +1782,44 @@ netdev_dpdk_ring_get_stats(const struct netdev *netdev, struct netdev_stats *sta
 
     ovs_mutex_unlock(&dev->mutex);
 
+    return 0;
+}
+
+
+static int
+netdev_dpdk_ring_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    struct dpdk_ring *ring;
+    int err;
+
+    ring = look_dpdkr_for_port_id(dev->port_id);
+
+    /*
+     * if the ring is not direct then get the local stats
+     */
+
+    err = netdev_dpdk_get_stats(netdev, stats);
+    if (err)
+        return err;
+
+    /* dev->stats represents the packets that were sent using the bypass device */
+    stats->rx_packets += dev->stats.rx_packets;
+    stats->tx_packets += dev->stats.tx_packets;
+    stats->rx_bytes += dev->stats.rx_bytes;
+    stats->tx_bytes += dev->stats.tx_bytes;
+    stats->tx_errors += dev->stats.tx_errors;
+
+    if (ring->direct) {
+        struct netdev_stats bypass_stats;
+        netdev_dpdk_get_bypass_stats(netdev, &bypass_stats);
+
+        stats->rx_packets += bypass_stats.rx_packets;
+        stats->tx_packets += bypass_stats.tx_packets;
+        stats->rx_bytes += bypass_stats.rx_bytes;
+        stats->tx_bytes += bypass_stats.tx_bytes;
+        stats->tx_errors += bypass_stats.tx_errors;
+    }
     return 0;
 }
 
@@ -2161,6 +2194,8 @@ request_remove_slave(const char * port, const char *old)
 struct direct_args {
     struct netdev *dev1;
     struct netdev *dev2;
+    void (*callback)(void *);
+    void *args;
 };
 
 static void *
@@ -2274,6 +2309,29 @@ netdev_dpdk_delete_direct_link_thread(void *args_)
         xsleep(1);
     }
 
+    if (args.callback) {
+        args.callback(args.args);
+    }
+
+    struct netdev_stats stats;
+
+    /* update the local counters with the packets sent using the direct link */
+    netdev_dpdk_get_bypass_stats(&dev1->up, &stats);
+
+    dev1->stats.rx_packets += stats.rx_packets;
+    dev1->stats.tx_packets += stats.tx_packets;
+    //dev1->stats.rx_bytes += stats.rx_bytes;
+    //dev1->stats.tx_bytes += stats.tx_bytes;
+    dev1->stats.tx_errors += stats.tx_errors;
+
+    netdev_dpdk_get_bypass_stats(&dev2->up, &stats);
+
+    dev2->stats.rx_packets += stats.rx_packets;
+    dev2->stats.tx_packets += stats.tx_packets;
+    //dev2->stats.rx_bytes += stats.rx_bytes;
+    //dev2->stats.tx_bytes += stats.tx_bytes;
+    dev2->stats.tx_errors += stats.tx_errors;
+
     return NULL;
 
 error_unlock:
@@ -2283,7 +2341,8 @@ error_unlock:
 }
 
 int
-netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_)
+netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
+                                    void (*callback)(void *), void * fargs)
 {
     pthread_t tid;
     pthread_attr_t attr;
@@ -2291,6 +2350,8 @@ netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_)
     struct direct_args *args = malloc(sizeof(*args));
     args->dev1 = dev1_;
     args->dev2 = dev2_;
+    args->callback = callback;
+    args->args = fargs;
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);

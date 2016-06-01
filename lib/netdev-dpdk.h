@@ -31,7 +31,13 @@ void free_dpdk_buf(struct dp_packet *);
 int pmd_thread_setaffinity_cpu(unsigned cpu);
 
 int netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_);
-int netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_);
+int netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
+                                    void (*callback)(void *), void * fargs);
+
+int netdev_dpdk_get_bypass_stats(const struct netdev *netdev,
+                                    struct netdev_stats *stats);
+
+
 #else
 
 #define NON_PMD_CORE_ID UINT32_MAX
