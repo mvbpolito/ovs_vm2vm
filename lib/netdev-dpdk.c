@@ -2260,6 +2260,19 @@ netdev_dpdk_delete_direct_link_thread(void *args_)
         goto error_unlock;
     }
 
+    /* tell the guest to send the cap on the normal channel */
+    dpdk_ring1->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
+    dpdk_ring2->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
+
+    /* give some time for the apps to send the last packets over the bypass */
+    xsleep(1);
+
+    /* just in case the app have not set the state */
+    dpdk_ring1->internals->tx_ring_queues[0].state = NORMAL_TX;
+    dpdk_ring2->internals->tx_ring_queues[0].state = NORMAL_TX;
+    dpdk_ring1->internals->rx_ring_queues[0].state = NORMAL_RX;
+    dpdk_ring2->internals->rx_ring_queues[0].state = NORMAL_RX;
+
     /* wait until ports are in normal mode, then unplug slave devices */
     for (i = 0; i < 5; i++) {
         if (dpdk_ring1->internals->bypass_state == BYPASS_DETACHED &&
@@ -2384,8 +2397,6 @@ netdev_dpdk_create_direct_link_thread(void *args_)
     char ring_name[RTE_RING_NAMESIZE];
     char port_name[RTE_ETH_NAME_MAX_LEN];
 
-    int i;
-
     VLOG_INFO("Creating direct dpdkr link %s <-> %s\n",
                 dev1->up.name, dev2->up.name);
 
@@ -2446,30 +2457,26 @@ netdev_dpdk_create_direct_link_thread(void *args_)
     err = rte_ivshmem_metadata_create(port_name);
     if (err) {
         VLOG_ERR("Error creating metadata: '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = rte_ivshmem_metadata_add_pmd_ring(port_name,
                                         &ring_2_1, 1, &ring_1_2, 1, port_name);
     if (err) {
         VLOG_ERR("Error adding pmd '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
     if (err) {
         VLOG_ERR("Error creating command line for '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = plug_ivshmem_device(dev1->up.name, port_name, cmdline, pci_addr);
     if (err) {
         VLOG_ERR("Error plugging port '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     /* create second ivshmem with a ring pmd inside */
@@ -2480,71 +2487,64 @@ netdev_dpdk_create_direct_link_thread(void *args_)
     err = rte_ivshmem_metadata_create(port_name);
     if (err) {
         VLOG_ERR("Error creating metadata: '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = rte_ivshmem_metadata_add_pmd_ring(port_name,
                                         &ring_1_2, 1, &ring_2_1, 1, port_name);
     if (err) {
         VLOG_ERR("Error adding pmd '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = rte_ivshmem_metadata_cmdline_generate(cmdline, sizeof(cmdline), port_name);
     if (err) {
         VLOG_ERR("Error creating command line for '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     err = plug_ivshmem_device(dev2->up.name, port_name, cmdline, pci_addr);
     if (err) {
         VLOG_ERR("Error plugging port '%s'", port_name);
-        //return err;
-        return NULL;
+        goto error_unlock;
     }
 
     /* add slaves */
-    err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr);
-    if (err) {
-        VLOG_ERR("Error requesting changing ports");
-        //return err;
-        return NULL;
-    }
+    strcpy(dpdk_ring1->internals->bypass_dev, pci_addr);
+    //err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr);
+    //if (err) {
+    //    VLOG_ERR("Error requesting changing ports");
+    //    goto error_unlock;
+    //}
 
-    err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr);
-    if (err) {
-        VLOG_ERR("Error requesting changing ports");
-        //return err;
-        return NULL;
-    }
+    strcpy(dpdk_ring2->internals->bypass_dev, pci_addr);
+    //err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr);
+    //if (err) {
+    //    VLOG_ERR("Error requesting changing ports");
+    //    goto error_unlock;
+    //}
+
+    /* tell the guest to send the cap on the normal channel */
+    dpdk_ring1->internals->tx_ring_queues[0].state = CREATION_TX;
+    dpdk_ring2->internals->tx_ring_queues[0].state = CREATION_TX;
+
+    /* give some time for the apps to send the last packets over the normal
+     * channel */
+    xsleep(1);
+
+    /* just in case the app have not set the state */
+    dpdk_ring1->internals->tx_ring_queues[0].state = BYPASS_TX;
+    dpdk_ring2->internals->tx_ring_queues[0].state = BYPASS_TX;
+    dpdk_ring1->internals->rx_ring_queues[0].state = BYPASS_RX;
+    dpdk_ring2->internals->rx_ring_queues[0].state = BYPASS_RX;
 
     ovs_mutex_unlock(&dpdk_mutex);
 
-    /* XXX: is it necessary to have a lock for this loop? */
+    dev1->requested_n_rxq = 0;
+    netdev_request_reconfigure(&dev1->up);
 
-    /* wait until ports are in bypass mode, then set the number of rx queues to
-     * 0, it means that no pmd thread will pool that ports.
-     */
-    for (i = 0; i < 5; i++) {
-        if (dpdk_ring1->internals->mode == MODE_BYPASS &&
-            dpdk_ring2->internals->mode == MODE_BYPASS) {
-
-            VLOG_INFO("Devices are in bypass mode\n");
-
-            dev1->requested_n_rxq = 0;
-            netdev_request_reconfigure(&dev1->up);
-
-            dev2->requested_n_rxq = 0;
-            netdev_request_reconfigure(&dev2->up);
-
-            break;
-        }
-
-        xsleep(1);
-    }
+    dev2->requested_n_rxq = 0;
+    netdev_request_reconfigure(&dev2->up);
 
     //return 0;
     return NULL;

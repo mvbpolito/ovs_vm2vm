@@ -3434,6 +3434,13 @@ create_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
     ofp_port2 = b_path->port_2;
     ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
 
+    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
+
+    if (ofport_1->netdev->netdev_class != dpdkr_class ||
+        ofport_2->netdev->netdev_class != dpdkr_class) {
+            return 0;
+    }
+
     /* create direct link */
     err = netdev_dpdk_create_direct_link(ofport_1->netdev, ofport_2->netdev);
     if (err) {
@@ -3529,9 +3536,20 @@ remove_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
     ofp_port2 = b_path->port_2;
     ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
 
+    if (!ofport_1 || !ofport_2)
+        return 0;
+
     struct remove_cb_args * args = malloc(sizeof(*args));
     args->ofproto = ofproto;
     args->b_path = *b_path; /* deep copy */
+
+    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
+
+
+    if (ofport_1->netdev->netdev_class != dpdkr_class ||
+        ofport_2->netdev->netdev_class != dpdkr_class) {
+            return 0;
+    }
 
     /* delete direct link */
     err = netdev_dpdk_delete_direct_link(ofport_1->netdev, ofport_2->netdev,
@@ -4399,8 +4417,8 @@ complete_operation(struct rule_dpif *rule)
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(rule->up.ofproto);
 
     ofproto->backer->need_revalidate = REV_FLOW_TABLE;
-
-    direct_paths_update(ofproto);
+    if(true)
+        direct_paths_update(ofproto);
 }
 
 static struct rule_dpif *rule_dpif_cast(const struct rule *rule)
