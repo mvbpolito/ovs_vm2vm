@@ -2390,7 +2390,8 @@ netdev_dpdk_create_direct_link_thread(void *args_)
     struct rte_ring *ring_1_2, *ring_2_1;
     struct dpdk_ring *dpdk_ring1, *dpdk_ring2;
     char cmdline[512];
-    char pci_addr[30];
+    char pci_addr1[30];
+    char pci_addr2[30];
 
     /* ports that are directly connected */
 
@@ -2473,7 +2474,7 @@ netdev_dpdk_create_direct_link_thread(void *args_)
         goto error_unlock;
     }
 
-    err = plug_ivshmem_device(dev1->up.name, port_name, cmdline, pci_addr);
+    err = plug_ivshmem_device(dev1->up.name, port_name, cmdline, pci_addr1);
     if (err) {
         VLOG_ERR("Error plugging port '%s'", port_name);
         goto error_unlock;
@@ -2503,21 +2504,21 @@ netdev_dpdk_create_direct_link_thread(void *args_)
         goto error_unlock;
     }
 
-    err = plug_ivshmem_device(dev2->up.name, port_name, cmdline, pci_addr);
+    err = plug_ivshmem_device(dev2->up.name, port_name, cmdline, pci_addr2);
     if (err) {
         VLOG_ERR("Error plugging port '%s'", port_name);
         goto error_unlock;
     }
 
     /* add slaves */
-    strcpy(dpdk_ring1->internals->bypass_dev, pci_addr);
+    strcpy(dpdk_ring1->internals->bypass_dev, pci_addr1);
     //err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr);
     //if (err) {
     //    VLOG_ERR("Error requesting changing ports");
     //    goto error_unlock;
     //}
 
-    strcpy(dpdk_ring2->internals->bypass_dev, pci_addr);
+    strcpy(dpdk_ring2->internals->bypass_dev, pci_addr2);
     //err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr);
     //if (err) {
     //    VLOG_ERR("Error requesting changing ports");
