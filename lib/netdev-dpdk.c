@@ -322,6 +322,10 @@ struct dpdkr_direct_link {
     struct rte_ring *rings[2];  /* rte_rings that communicates both VMs */
 };
 
+struct dpdk_direct_link {
+    struct dpdk_ring *ring;
+};
+
 struct dpdk_ring {
     /* For the client rings */
     struct rte_ring *cring_tx;
@@ -383,6 +387,8 @@ struct netdev_dpdk {
      * netdev_dpdk*_reconfigure() is called */
     int requested_n_txq;
     int requested_n_rxq;
+
+    struct dpdk_direct_link *direct; /* if set the port is direct */
 };
 
 struct netdev_rxq_dpdk {
@@ -2162,6 +2168,13 @@ plug_ivshmem_device(const char *port, const char *id,
 }
 
 static int
+plug_physical_device(const char *port, const char *id,
+    const char *cmdline_, char *pci_addr)
+{
+    return plug_device(port, id, cmdline_, pci_addr, 1);
+}
+
+static int
 send_dpdk_command(const char *port, const char *command)
 {
     char json[1024] = {0};
@@ -2376,7 +2389,7 @@ netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
 }
 
 static void *
-netdev_dpdk_create_direct_link_thread(void *args_)
+netdev_dpdk_create_direct_dpdkr_link_thread(void *args_)
 {
     struct direct_args args = *((struct direct_args *) args_);
     free(args_);
@@ -2512,18 +2525,18 @@ netdev_dpdk_create_direct_link_thread(void *args_)
 
     /* add slaves */
     strcpy(dpdk_ring1->internals->bypass_dev, pci_addr1);
-    //err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr);
-    //if (err) {
-    //    VLOG_ERR("Error requesting changing ports");
-    //    goto error_unlock;
-    //}
+    err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr1);
+    if (err) {
+        VLOG_ERR("Error requesting changing ports");
+        goto error_unlock;
+    }
 
     strcpy(dpdk_ring2->internals->bypass_dev, pci_addr2);
-    //err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr);
-    //if (err) {
-    //    VLOG_ERR("Error requesting changing ports");
-    //    goto error_unlock;
-    //}
+    err = request_add_slave(dev2->up.name, dev2->up.name, pci_addr2);
+    if (err) {
+        VLOG_ERR("Error requesting changing ports");
+        goto error_unlock;
+    }
 
     /* tell the guest to send the cap on the normal channel */
     dpdk_ring1->internals->tx_ring_queues[0].state = CREATION_TX;
@@ -2556,6 +2569,87 @@ error_unlock:
     return NULL;
 }
 
+static void *
+netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
+{
+    struct direct_args args = *((struct direct_args *) args_);
+    free(args_);
+
+    struct netdev_dpdk *dpdk = netdev_dpdk_cast(args.dev1);
+    struct netdev_dpdk *dpdkr_ = netdev_dpdk_cast(args.dev2);
+    struct dpdk_ring *dpdkr;
+    struct dpdk_direct_link *direct_link;
+
+    int err;
+    char pci_addr[30];
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    if (dpdk->direct) {
+        VLOG_ERR("Port '%s' is already direct\n", dpdk->up.name);
+        goto error_unlock;
+    }
+
+    dpdkr = look_dpdkr_for_port_id(dpdkr_->port_id);
+    ovs_assert(dpdkr);
+
+    if (dpdkr->direct) {
+        VLOG_ERR("Port '%s' is already direct\n", dpdkr_->up.name);
+        goto error_unlock;
+    }
+
+    VLOG_INFO("Creating direct dpdkr link %s <-> %s\n",
+                dpdk->up.name, dpdkr_->up.name);
+
+    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
+    direct_link->ring = dpdkr;
+
+    dpdk->direct = direct_link;
+
+    snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dpdk->port_id, dpdkr_->port_id);
+
+    err = plug_physical_device(dpdkr_->up.name, port_name, "06:10.1", pci_addr);
+    if (err) {
+        VLOG_ERR("Error plugging port '%s'", port_name);
+        goto error_unlock;
+    }
+
+    strcpy(dpdkr->internals->bypass_dev, pci_addr);
+    err = request_add_slave(dpdkr_->up.name, dpdkr_->up.name, pci_addr);
+    if (err) {
+        VLOG_ERR("Error requesting changing ports");
+        goto error_unlock;
+    }
+
+    /* tell the guest to send the cap on the normal channel */
+    dpdkr->internals->tx_ring_queues[0].state = CREATION_TX;
+
+    /* give some time for the apps to send the last packets over the normal
+     * channel */
+    xsleep(1);
+
+    /* just in case the app have not set the state */
+    dpdkr->internals->tx_ring_queues[0].state = BYPASS_TX;
+    dpdkr->internals->rx_ring_queues[0].state = BYPASS_RX;
+
+    ovs_mutex_unlock(&dpdk_mutex);
+
+    dpdk->requested_n_rxq = 0;
+    netdev_request_reconfigure(&dpdk->up);
+
+    dpdkr_->requested_n_rxq = 0;
+    netdev_request_reconfigure(&dpdkr_->up);
+
+    ovs_mutex_unlock(&dpdk_mutex);
+    return NULL;
+
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    return NULL;
+}
+
 int
 netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_)
 {
@@ -2563,17 +2657,42 @@ netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_)
     pthread_attr_t attr;
 
     struct direct_args *args = malloc(sizeof(*args));
-    args->dev1 = dev1_;
-    args->dev2 = dev2_;
+
+    /*
+     * before creating a thread to do all the work it is good to check that the
+     * path can be optmized
+     */
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    pthread_create(&tid, &attr, netdev_dpdk_create_direct_link_thread,
+    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
+    struct netdev_class *dpdk_class = netdev_lookup_class("dpdk")->class;
+
+    if (dev1_->netdev_class != dpdkr_class &&
+        dev2_->netdev_class != dpdkr_class) {
+        args->dev1 = dev1_;
+        args->dev2 = dev2_;
+        pthread_create(&tid, &attr, netdev_dpdk_create_direct_dpdkr_link_thread,
                     (void *)args);
+    }
+    else if (dev1_->netdev_class != dpdkr_class &&
+             dev2_->netdev_class != dpdk_class) {
+        args->dev1 = dev1_;
+        args->dev2 = dev2_;
+        netdev_dpdk_create_direct_dpdk_link_thread(args);
+    }
+    else if (dev1_->netdev_class != dpdk_class &&
+             dev2_->netdev_class != dpdkr_class) {
+        args->dev1 = dev2_;
+        args->dev2 = dev1_;
+        netdev_dpdk_create_direct_dpdk_link_thread(args);
+    }
+    else {
+        return -2;  /* direct path is not valid for optimization */
+    }
 
     return 0;
-
 }
 
 static void

@@ -3434,19 +3434,16 @@ create_direct_path(struct ofproto_dpif * ofproto, struct b_path * b_path)
     ofp_port2 = b_path->port_2;
     ofport_2 = ofproto_get_port(&ofproto->up, ofp_port2);
 
-    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
-
-    if (ofport_1->netdev->netdev_class != dpdkr_class ||
-        ofport_2->netdev->netdev_class != dpdkr_class) {
-            return 0;
-    }
-
-    /* create direct link */
+    /* try create direct link */
     err = netdev_dpdk_create_direct_link(ofport_1->netdev, ofport_2->netdev);
-    if (err) {
-        VLOG_ERR("failed to create direct link...\n");
+    if (err == -1) {
+        VLOG_ERR("Failed to create direct link...\n");
         return -1;
     }
+    else if(err != 0) {
+        VLOG_DBG("Direct path cannot be optimized...\n");
+        return 0;
+     }
 
     /* XXX: remove rules from datapath */
     ofproto_rule_ref(&b_path->rule1->up);
