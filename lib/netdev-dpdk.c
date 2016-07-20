@@ -2143,7 +2143,8 @@ plug_device(const char *port, const char *id,
     char json[1024] = {0};
 
     snprintf(json, 1024, PLUG_PORT_JSON_FORMAT, port, id,
-        type == 0 ? "ivshmem" : "pci_assign", device);
+        type == 0 ? "ivshmem" : "pci-assign", device);
+
 
     return send_command_to_vm(UNIVERSAL_NODE_URL_ATTACH, json, pci_addr);
 }
@@ -2171,7 +2172,9 @@ static int
 plug_physical_device(const char *port, const char *id,
     const char *cmdline_, char *pci_addr)
 {
-    return plug_device(port, id, cmdline_, pci_addr, 1);
+    char device[20];
+    snprintf(device, sizeof(device), "host=%s", cmdline_);
+    return plug_device(port, id, device, pci_addr, 1);
 }
 
 static int
@@ -2669,23 +2672,23 @@ netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_)
     struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
     struct netdev_class *dpdk_class = netdev_lookup_class("dpdk")->class;
 
-    if (dev1_->netdev_class != dpdkr_class &&
-        dev2_->netdev_class != dpdkr_class) {
+    if (dev1_->netdev_class == dpdkr_class &&
+        dev2_->netdev_class == dpdkr_class) {
         args->dev1 = dev1_;
         args->dev2 = dev2_;
         pthread_create(&tid, &attr, netdev_dpdk_create_direct_dpdkr_link_thread,
                     (void *)args);
     }
-    else if (dev1_->netdev_class != dpdkr_class &&
-             dev2_->netdev_class != dpdk_class) {
-        args->dev1 = dev1_;
-        args->dev2 = dev2_;
-        netdev_dpdk_create_direct_dpdk_link_thread(args);
-    }
-    else if (dev1_->netdev_class != dpdk_class &&
-             dev2_->netdev_class != dpdkr_class) {
+    else if (dev1_->netdev_class == dpdkr_class &&
+             dev2_->netdev_class == dpdk_class) {
         args->dev1 = dev2_;
         args->dev2 = dev1_;
+        netdev_dpdk_create_direct_dpdk_link_thread(args);
+    }
+    else if (dev1_->netdev_class == dpdk_class &&
+             dev2_->netdev_class == dpdkr_class) {
+        args->dev1 = dev1_;
+        args->dev2 = dev2_;
         netdev_dpdk_create_direct_dpdk_link_thread(args);
     }
     else {
