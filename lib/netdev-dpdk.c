@@ -55,6 +55,7 @@
 #include "rte_mbuf.h"
 #include "rte_meter.h"
 #include "rte_virtio_net.h"
+#include "rte_pci.h"
 
 VLOG_DEFINE_THIS_MODULE(dpdk);
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
@@ -147,7 +148,7 @@ static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
 
 static const struct rte_eth_conf port_conf = {
     .rxmode = {
-        .mq_mode = ETH_MQ_RX_RSS,
+        //.mq_mode = ETH_MQ_RX_RSS,
         .split_hdr_size = 0,
         .header_split   = 0, /* Header Split disabled */
         .hw_ip_checksum = 0, /* IP checksum offload disabled */
@@ -282,6 +283,12 @@ static struct ovs_list dpdk_list OVS_GUARDED_BY(dpdk_mutex)
 static struct ovs_list dpdk_mp_list OVS_GUARDED_BY(dpdk_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_mp_list);
 
+struct vf_info {
+    uint8_t vf_id;              /* virtual function id */
+    struct rte_pci_addr addr;   /* pci address of the virtual function */
+    bool available;
+};
+
 /* This mutex must be used by non pmd threads when allocating or freeing
  * mbufs through mempools. Since dpdk_queue_pkts() and dpdk_queue_flush() may
  * use mempools, a non pmd thread should hold this mutex while calling them */
@@ -389,6 +396,11 @@ struct netdev_dpdk {
     int requested_n_rxq;
 
     struct dpdk_direct_link *direct; /* if set the port is direct */
+
+    /* vector containing all virtual functions info */
+    struct vf_info *vf_info;
+    uint16_t n_vfs;
+    uint16_t pf_pool;   /* physical function pool XXX: should be n_vfs*/
 };
 
 struct netdev_rxq_dpdk {
@@ -688,6 +700,29 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev) OVS_REQUIRES(dpdk_mutex)
         VLOG_ERR("Interface %s(rxq:%d txq:%d) configure error: %s",
                  dev->up.name, n_rxq, n_txq, rte_strerror(-diag));
         return -diag;
+    }
+
+    if (info.max_vfs) {
+        dev->vf_info = malloc(info.max_vfs * sizeof(*dev->vf_info));
+        dev->n_vfs = info.max_vfs;
+        dev->pf_pool = info.max_vfs;    /* XXX: only valid when 1 queue per vf */
+        struct rte_pci_addr base_addr = info.pci_dev->addr;
+        int i;
+        for (i = 0; i < info.max_vfs; i++) {
+
+            struct rte_pci_addr addr;
+            addr.domain = base_addr.domain;
+            addr.bus = base_addr.bus;
+            addr.devid = 0x10;  /* is this value always correct? */
+            addr.function = base_addr.function + 2*i;   /* XXX: it is not valid for al the cases */
+
+            dev->vf_info[i].vf_id = i;
+            dev->vf_info[i].addr = addr;
+            dev->vf_info[i].available = true;
+        }
+
+    } else {
+        dev->vf_info = NULL;
     }
 
     diag = rte_eth_dev_start(dev->port_id);
@@ -2582,10 +2617,14 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     struct netdev_dpdk *dpdkr_ = netdev_dpdk_cast(args.dev2);
     struct dpdk_ring *dpdkr;
     struct dpdk_direct_link *direct_link;
-
+    struct vf_info *vf_info = NULL;
     int err;
     char pci_addr[30];
+    char host_pci_addr[30];
     char port_name[RTE_ETH_NAME_MAX_LEN];
+
+    bool bypass_ready = false;
+    int i;
 
     ovs_mutex_lock(&dpdk_mutex);
 
@@ -2613,7 +2652,23 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
                 dpdk->port_id, dpdkr_->port_id);
 
-    err = plug_physical_device(dpdkr_->up.name, port_name, "06:10.1", pci_addr);
+
+    for (i = 0; i < dpdk->n_vfs; i++) {
+        if (dpdk->vf_info[i].available) {
+            vf_info = &dpdk->vf_info[i];
+            break;
+        }
+    }
+
+    if (!vf_info) {
+        VLOG_ERR("There are not available virtual function in port '%s'", port_name);
+        goto error_unlock;
+    }
+
+    snprintf(host_pci_addr, sizeof(host_pci_addr), PCI_SHORT_PRI_FMT,
+             vf_info->addr.bus, vf_info->addr.devid, vf_info->addr.function);
+
+    err = plug_physical_device(dpdkr_->up.name, port_name, host_pci_addr, pci_addr);
     if (err) {
         VLOG_ERR("Error plugging port '%s'", port_name);
         goto error_unlock;
@@ -2626,26 +2681,45 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
         goto error_unlock;
     }
 
+    for (i = 0; i < 500; i++) {
+
+        if (dpdkr->internals->bypass_state == BYPASS_ATTACHED) {
+            bypass_ready = true;
+            VLOG_INFO("Bypass for port '%s' is attached. i = %d", port_name, i);
+            break;
+        }
+
+        usleep(10*1000);    /* 10 ms */
+    }
+
+    if (!bypass_ready) {
+        VLOG_ERR("Bypass device for '%s' is not ready", port_name);
+        goto error_unlock;
+    }
+
+    err = rte_eth_set_default_pool(dpdk->port_id, vf_info->vf_id);
+    if (err) {
+        VLOG_ERR("Error setting default pool for '%s': %s", port_name, rte_strerror(err));
+        goto error_unlock;
+    }
+
     /* tell the guest to send the cap on the normal channel */
     dpdkr->internals->tx_ring_queues[0].state = CREATION_TX;
-
-    /* give some time for the apps to send the last packets over the normal
-     * channel */
-    xsleep(1);
 
     /* just in case the app have not set the state */
     dpdkr->internals->tx_ring_queues[0].state = BYPASS_TX;
     dpdkr->internals->rx_ring_queues[0].state = BYPASS_RX;
 
+    vf_info->available = false;
+
     ovs_mutex_unlock(&dpdk_mutex);
 
-    dpdk->requested_n_rxq = 0;
-    netdev_request_reconfigure(&dpdk->up);
+    //dpdk->requested_n_rxq = 0;
+    //netdev_request_reconfigure(&dpdk->up);
 
     dpdkr_->requested_n_rxq = 0;
     netdev_request_reconfigure(&dpdkr_->up);
 
-    ovs_mutex_unlock(&dpdk_mutex);
     return NULL;
 
 error_unlock:
@@ -2683,13 +2757,17 @@ netdev_dpdk_create_direct_link(struct netdev *dev1_, struct netdev *dev2_)
              dev2_->netdev_class == dpdk_class) {
         args->dev1 = dev2_;
         args->dev2 = dev1_;
-        netdev_dpdk_create_direct_dpdk_link_thread(args);
+        //netdev_dpdk_create_direct_dpdk_link_thread(args);
+        pthread_create(&tid, &attr, netdev_dpdk_create_direct_dpdk_link_thread,
+                    (void *)args);
     }
     else if (dev1_->netdev_class == dpdk_class &&
              dev2_->netdev_class == dpdkr_class) {
         args->dev1 = dev1_;
         args->dev2 = dev2_;
-        netdev_dpdk_create_direct_dpdk_link_thread(args);
+        //netdev_dpdk_create_direct_dpdk_link_thread(args);
+        pthread_create(&tid, &attr, netdev_dpdk_create_direct_dpdk_link_thread,
+                    (void *)args);
     }
     else {
         return -2;  /* direct path is not valid for optimization */
