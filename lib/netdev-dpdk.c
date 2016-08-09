@@ -2250,7 +2250,7 @@ struct direct_args {
 };
 
 static void *
-netdev_dpdk_delete_direct_link_thread(void *args_)
+netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
 {
     struct direct_args args = *((struct direct_args *) args_);
     free(args_);
@@ -2404,6 +2404,136 @@ error_unlock:
     return NULL;
 }
 
+static void *
+netdev_dpdk_delete_direct_dpdk_link_thread(void *args_)
+{
+    struct direct_args args = *((struct direct_args *) args_);
+    free(args_);
+
+    struct netdev_dpdk *dpdk = netdev_dpdk_cast(args.dev1);
+    struct netdev_dpdk *dpdkr_ = netdev_dpdk_cast(args.dev2);
+    struct dpdk_ring *dpdkr;
+    struct dpdk_direct_link *direct_link;
+    struct vf_info *vf_info = NULL;
+    char port_name[RTE_ETH_NAME_MAX_LEN];
+    int i, err;
+
+    VLOG_INFO("Deleting direct dpdk link %s <-> %s\n",
+                dpdk->up.name, dpdkr_->up.name);
+
+    ovs_mutex_lock(&dpdk_mutex);
+
+    /* look for the ports */
+    dpdkr = look_dpdkr_for_port_id(dpdkr_->port_id);
+    ovs_assert(dpdkr);
+
+
+    /* check that the ports are not already in direct mode */
+    if (!dpdkr->direct) {
+        VLOG_ERR("Port '%s' is not direct\n", dpdkr_->up.name);
+        goto error_unlock;
+    }
+
+    if (!dpdk->direct) {
+        VLOG_ERR("Port '%s' is not direct\n", dpdk->up.name);
+        goto error_unlock;
+    }
+
+    /* restarts PMD threads.
+     * Important: current implementation of ovs does not stops the pmd threads even
+     * if they have no queues to poll, then the PMDs are actually not stopped.
+     */
+    dpdkr_->requested_n_rxq = 1;
+    netdev_request_reconfigure(&dpdkr_->up);
+
+    //dpdk->requested_n_rxq = 1;
+    //netdev_request_reconfigure(&dpdk->up);
+
+    ovs_mutex_unlock(&dpdk_mutex);
+
+    /* remove first slave device */
+    err = request_remove_slave(dpdkr_->up.name, dpdkr_->up.name);
+    if (err) {
+        VLOG_ERR("Error removing device: '%s'", dpdkr_->up.name);
+        goto error_unlock;
+    }
+
+    err = rte_eth_set_default_pool(dpdk->port_id, dpdk->pf_pool);
+    if (err) {
+        VLOG_ERR("Error setting default pool for '%s': %s", dpdk->up.name, rte_strerror(err));
+        goto error_unlock;
+    }
+
+    /* tell the guest to send the cap on the normal channel */
+    dpdkr->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
+
+    /* give some time for the apps to send the last packets over the bypass */
+    xsleep(1);
+
+    /* just in case the app have not set the state */
+    dpdkr->internals->tx_ring_queues[0].state = NORMAL_TX;
+    dpdkr->internals->rx_ring_queues[0].state = NORMAL_RX;
+
+    /* wait until ports are in normal mode, then unplug slave devices */
+    for (i = 0; i < 50; i++) {
+        if (dpdkr->internals->bypass_state == BYPASS_DETACHED) {
+
+            VLOG_INFO("Devices are in normal mode\n");
+
+            snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
+                dpdk->port_id, dpdkr_->port_id);
+            err = unplug_device(dpdkr_->up.name, port_name);
+            if (err) {
+                VLOG_ERR("Error unplugging device: '%s'", port_name);
+                goto error_unlock;
+            }
+
+            direct_link = dpdk->direct;
+
+            rte_free(direct_link);
+            dpdkr->direct = NULL;
+            dpdkr_->direct = NULL;
+            dpdk->direct = NULL;
+
+            break;
+        }
+
+        xsleep(1);
+    }
+
+    //if (args.callback) {
+    //    args.callback(args.args);
+    //}
+    //
+    //struct netdev_stats stats;
+
+    /* update the local counters with the packets sent using the direct link */
+    //netdev_dpdk_get_bypass_stats(&dpdkr_->up, &stats);
+    //
+    //dpdkr_->stats.rx_packets += stats.rx_packets;
+    //dpdkr_->stats.tx_packets += stats.tx_packets;
+    ////dev1->stats.rx_bytes += stats.rx_bytes;
+    ////dev1->stats.tx_bytes += stats.tx_bytes;
+    //dpdkr_->stats.tx_errors += stats.tx_errors;
+
+    /* XXX: how are statistics supposed to work in this case? */
+
+    //netdev_dpdk_get_bypass_stats(&dpdk->up, &stats);
+    //
+    //dpdk->stats.rx_packets += stats.rx_packets;
+    //dpdk->stats.tx_packets += stats.tx_packets;
+    ////dev2->stats.rx_bytes += stats.rx_bytes;
+    ////dev2->stats.tx_bytes += stats.tx_bytes;
+    //dpdk->stats.tx_errors += stats.tx_errors;
+
+    return NULL;
+
+error_unlock:
+    ovs_mutex_unlock(&dpdk_mutex);
+    //return err;
+    return NULL;
+}
+
 int
 netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
                                     void (*callback)(void *), void * fargs)
@@ -2412,16 +2542,42 @@ netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
     pthread_attr_t attr;
 
     struct direct_args *args = malloc(sizeof(*args));
-    args->dev1 = dev1_;
-    args->dev2 = dev2_;
-    args->callback = callback;
-    args->args = fargs;
+
+    /*
+     * before creating a thread to do all the work it is good to check that the
+     * path can be optmized
+     */
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    pthread_create(&tid, &attr, netdev_dpdk_delete_direct_link_thread,
+    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
+    struct netdev_class *dpdk_class = netdev_lookup_class("dpdk")->class;
+
+    if (dev1_->netdev_class == dpdkr_class &&
+        dev2_->netdev_class == dpdkr_class) {
+        args->dev1 = dev1_;
+        args->dev2 = dev2_;
+        pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdkr_link_thread,
                     (void *)args);
+    }
+    else if (dev1_->netdev_class == dpdkr_class &&
+             dev2_->netdev_class == dpdk_class) {
+        args->dev1 = dev2_;
+        args->dev2 = dev1_;
+        pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdk_link_thread,
+                    (void *)args);
+    }
+    else if (dev1_->netdev_class == dpdk_class &&
+             dev2_->netdev_class == dpdkr_class) {
+        args->dev1 = dev1_;
+        args->dev2 = dev2_;
+        pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdk_link_thread,
+                    (void *)args);
+    }
+    else {
+        return -2;  /* not a valid direct path */
+    }
 
     return 0;
 }
@@ -2648,6 +2804,7 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     direct_link->ring = dpdkr;
 
     dpdk->direct = direct_link;
+    dpdkr->direct = 0xFFFFF;    /* XXX: OMG!!!! */
 
     snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
                 dpdk->port_id, dpdkr_->port_id);

@@ -3516,20 +3516,16 @@ remove_direct_path(struct b_path *b_path)
     struct b_path *args = malloc(sizeof(*args));
     *args = *b_path; /* deep copy */
 
-    struct netdev_class *dpdkr_class = netdev_lookup_class("dpdkr")->class;
-
-    if (b_path->port_1->netdev->netdev_class != dpdkr_class ||
-        b_path->port_2->netdev->netdev_class != dpdkr_class) {
-            return 0;
-    }
-
     /* delete direct link */
     err = netdev_dpdk_delete_direct_link(b_path->port_1->netdev, b_path->port_2->netdev,
                 remove_direct_path_cb, args);
-    if (err) {
+    if (err == -1) {
         VLOG_ERR("failed to delete direct link...\n");
         return -1;
-    }
+    } else if(err != 0) {
+        VLOG_DBG("Direct path is not valid...\n");
+        return 0;
+     }
 
     return 0;
 }
