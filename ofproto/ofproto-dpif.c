@@ -3318,7 +3318,7 @@ struct b_path {
 struct ovs_list direct_paths = OVS_LIST_INITIALIZER(&direct_paths);
 
 static ofp_port_t
-get_masked_input_port(struct rule * rule)
+get_masked_input_port(struct rule *rule)
 {
     struct flow flow;
     struct flow_wildcards wc;
@@ -3337,9 +3337,9 @@ get_masked_input_port(struct rule * rule)
  * if ofpact is not OUTPUT it returns OFPP_NONE
  */
 static ofp_port_t
-ofpact_get_output_port(const struct ofpact * ofpact)
+ofpact_get_output_port(const struct ofpact *ofpact)
 {
-    if(ofpact->type != OFPACT_OUTPUT)
+    if (ofpact->type != OFPACT_OUTPUT)
         return OFPP_NONE;
 
     return ofpact_get_OUTPUT(ofpact)->port;
@@ -3351,13 +3351,13 @@ ofpact_get_output_port(const struct ofpact * ofpact)
  * path and return true, otherwise return false witout modifyng path
  */
 static bool
-get_path_from_rule(struct rule * rule, struct u_path * path)
+get_path_from_rule(struct rule *rule, struct u_path *path)
 {
     ofp_port_t in_port, out_port;
     struct flow_wildcards wc;
     struct minimask mask;
 
-    if(rule->table_id != 0)
+    if (rule->table_id != 0)
         return false;
 
     memset(&wc.masks, 0, sizeof (wc.masks));
@@ -3367,17 +3367,17 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
     miniflow_map_init(&mask.masks, &wc.masks);
     minimask_init(&mask, &wc);
 
-    if(!minimask_equal(&mask, rule->cr.match.mask))
+    if (!minimask_equal(&mask, rule->cr.match.mask))
         return false;
 
     in_port = get_masked_input_port(rule);
 
-    if(in_port == OFPP_CONTROLLER || in_port == OFPP_LOCAL)
+    if (in_port == OFPP_CONTROLLER || in_port == OFPP_LOCAL)
         return false;    /* XXX: Actually some rare thing happens here */
 
-    const struct rule_actions * rule_actions = rule->actions;
+    const struct rule_actions *rule_actions = rule->actions;
 
-    if(rule_actions->ofpacts_len == 0)
+    if (rule_actions->ofpacts_len == 0)
         return false;
 
     out_port = ofpact_get_output_port(&rule_actions->ofpacts[0]);
@@ -3394,8 +3394,7 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
         return false;
     }
 
-    if(path != NULL)
-    {
+    if (path != NULL) {
         path->in_port = ofproto_get_port(rule->ofproto, in_port);
         path->out_port = ofproto_get_port(rule->ofproto, out_port);
         path->rule = rule_dpif_cast(rule);
@@ -3405,14 +3404,13 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
 }
 
 static bool
-rule_outputs_to_port(struct rule * rule, ofp_port_t port)
+rule_outputs_to_port(struct rule *rule, ofp_port_t port)
 {
-    struct ofpact * ofpact;
-    const struct rule_actions * rule_actions = rule->actions;
+    struct ofpact *ofpact;
+    const struct rule_actions *rule_actions = rule->actions;
 
-    OFPACT_FOR_EACH(ofpact, rule_actions->ofpacts, rule_actions->ofpacts_len)
-    {
-        if(ofpact_outputs_to_port(ofpact, port))
+    OFPACT_FOR_EACH(ofpact, rule_actions->ofpacts, rule_actions->ofpacts_len) {
+        if (ofpact_outputs_to_port(ofpact, port))
             return true;
     }
 
@@ -3420,7 +3418,7 @@ rule_outputs_to_port(struct rule * rule, ofp_port_t port)
 }
 
 static bool
-b_paths_equal(struct b_path * a, struct b_path * b)
+b_paths_equal(struct b_path *a, struct b_path *b)
 {
     bool t1 = a->port_1->ofp_port == b->port_1->ofp_port && a->port_2->ofp_port == b->port_2->ofp_port;
     bool t2 = a->port_1->ofp_port == b->port_2->ofp_port && a->port_2->ofp_port == b->port_1->ofp_port;
@@ -3428,11 +3426,10 @@ b_paths_equal(struct b_path * a, struct b_path * b)
 }
 
 static bool
-list_contains_b_path(struct ovs_list * list, struct b_path * path)
+list_contains_b_path(struct ovs_list *list, struct b_path *path)
 {
-    struct b_path * path_i;
-    LIST_FOR_EACH(path_i, list_node, list)
-    {
+    struct b_path *path_i;
+    LIST_FOR_EACH (path_i, list_node, list) {
         if(b_paths_equal(path_i, path))
             return true;
     }
@@ -3441,7 +3438,7 @@ list_contains_b_path(struct ovs_list * list, struct b_path * path)
 }
 
 static int
-create_direct_path(struct b_path * b_path)
+create_direct_path(struct b_path *b_path)
 {
     int err;
 
@@ -3558,17 +3555,16 @@ direct_paths_update(void)
         struct ovs_list u_paths = OVS_LIST_INITIALIZER(&u_paths);
 
         /* first step: look for unidirectional paths */
-        struct rule * rule_i;
-        struct u_path * path = malloc(sizeof(*path));
-        HINDEX_FOR_EACH(rule_i, cookie_node, &ofproto->up.cookies)
-        {
-            if(rule_i->removed)
+        struct rule *rule_i;
+        struct u_path *path = malloc(sizeof(*path));
+        HINDEX_FOR_EACH(rule_i, cookie_node, &ofproto->up.cookies) {
+
+            if (rule_i->removed)
                 continue;
 
             bool is_direct = get_path_from_rule(rule_i, path);
 
-            if(is_direct)
-            {
+            if (is_direct) {
                 ovs_list_push_back(&u_paths, &path->list_node);
                 VLOG_INFO("Found '%s' -> '%s' rule\n",
                     path->in_port->netdev->name, path->out_port->netdev->name);
@@ -3577,32 +3573,28 @@ direct_paths_update(void)
             }
         }
 
-
         free(path); /* there always an element unused at the end */
 
         /* second and third steps */
-        struct u_path * path_i;
-        LIST_FOR_EACH(path_i, list_node, &u_paths)
-        {
-            HINDEX_FOR_EACH(rule_i, cookie_node, &ofproto->up.cookies)
-            {
+        struct u_path *path_i;
+        LIST_FOR_EACH (path_i, list_node, &u_paths) {
+            HINDEX_FOR_EACH (rule_i, cookie_node, &ofproto->up.cookies) {
+
                 if(rule_i->removed)
                     continue;
 
                 /* do not consider a -> b kind of rules */
-                if(get_path_from_rule(rule_i, NULL))
+                if (get_path_from_rule(rule_i, NULL))
                     continue;
 
                 /* second step: remove rules were input_port is used in other rules */
-                if(get_masked_input_port(rule_i) == path_i->in_port->ofp_port)
-                {
+                if (get_masked_input_port(rule_i) == path_i->in_port->ofp_port) {
                     ovs_list_remove(&path_i->list_node);
                     continue;
                 }
 
                 /* third step: remove rules where output_port is used in other rules */
-                if(rule_outputs_to_port(rule_i, path_i->out_port->ofp_port))
-                {
+                if (rule_outputs_to_port(rule_i, path_i->out_port->ofp_port)) {
                     ovs_list_remove(&path_i->list_node);
                     continue;
                 }
@@ -3610,16 +3602,13 @@ direct_paths_update(void)
         }
 
         /* fourth step: build bidirectional paths from unidirectional paths */
-        LIST_FOR_EACH(path_i, list_node, &u_paths)
-        {
-            struct u_path * path_j = path_i;
+        LIST_FOR_EACH (path_i, list_node, &u_paths) {
+            struct u_path *path_j = path_i;
 
-            LIST_FOR_EACH_CONTINUE(path_j, list_node, &u_paths)
-            {
-                if((path_i->in_port == path_j->out_port) &&
-                    (path_j->in_port == path_i->out_port))
-                {
-                    struct b_path * direct = malloc(sizeof(*direct));
+            LIST_FOR_EACH_CONTINUE(path_j, list_node, &u_paths) {
+                if ((path_i->in_port == path_j->out_port) &&
+                    (path_j->in_port == path_i->out_port)) {
+                    struct b_path *direct = malloc(sizeof(*direct));
                     direct->rule1 =  path_i->rule;
                     direct->port_1 = path_i->in_port;
                     direct->rule2 =  path_j->rule;
@@ -3629,8 +3618,7 @@ direct_paths_update(void)
             }
         }
 
-        LIST_FOR_EACH_POP(path_i, list_node, &u_paths)
-        {
+        LIST_FOR_EACH_POP (path_i, list_node, &u_paths) {
             free(path_i);
             path_i = 0;
         }
@@ -3638,9 +3626,9 @@ direct_paths_update(void)
 
     /* look for patch port rules */
 
-    struct b_path * b_path_i;
+    struct b_path *b_path_i;
 
-    LIST_FOR_EACH(b_path_i, list_node, &b_paths) {
+    LIST_FOR_EACH (b_path_i, list_node, &b_paths) {
         struct ofport_dpif *port1 = ofport_dpif_cast(b_path_i->port_1);
         struct ofport_dpif *port2 = ofport_dpif_cast(b_path_i->port_2);
 
@@ -3655,7 +3643,7 @@ direct_paths_update(void)
         }
     }
 
-    LIST_FOR_EACH(b_path_i, list_node, &b_paths) {
+    LIST_FOR_EACH (b_path_i, list_node, &b_paths) {
         struct ofport_dpif *port1 = ofport_dpif_cast(b_path_i->port_1);
 
         /* does this direct path include a patch port? */
@@ -3680,10 +3668,8 @@ direct_paths_update(void)
      */
 
     /*** look for deleted direct paths ***/
-    LIST_FOR_EACH(b_path_i, list_node, &direct_paths)
-    {
-        if(!list_contains_b_path(&b_paths, b_path_i))
-        {
+    LIST_FOR_EACH (b_path_i, list_node, &direct_paths) {
+        if (!list_contains_b_path(&b_paths, b_path_i)) {
             VLOG_INFO("Direct path '%s' <-> '%s' deleted\n",
                     b_path_i->port_1->netdev->name, b_path_i->port_2->netdev->name);
             ovs_list_remove(&b_path_i->list_node);
@@ -3693,14 +3679,12 @@ direct_paths_update(void)
     }
 
     /*** look for new direct paths ***/
-    LIST_FOR_EACH(b_path_i, list_node, &b_paths)
-    {
-        if(!list_contains_b_path(&direct_paths, b_path_i))
-        {
+    LIST_FOR_EACH (b_path_i, list_node, &b_paths) {
+        if (!list_contains_b_path(&direct_paths, b_path_i)) {
             VLOG_INFO("Direct path '%s' <-> '%s' added\n",
                     b_path_i->port_1->netdev->name, b_path_i->port_2->netdev->name);
 
-            struct b_path * t = malloc(sizeof(*t));
+            struct b_path *t = malloc(sizeof(*t));
             memcpy(t, (b_path_i), sizeof(*t));
             ovs_list_push_back(&direct_paths, &t->list_node);
 
@@ -3708,8 +3692,7 @@ direct_paths_update(void)
         }
     }
 
-    LIST_FOR_EACH_POP(b_path_i, list_node, &b_paths)
-    {
+    LIST_FOR_EACH_POP (b_path_i, list_node, &b_paths) {
         free(b_path_i);
         b_path_i = 0;
     }
