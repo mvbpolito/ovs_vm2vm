@@ -3592,12 +3592,6 @@ direct_paths_update(void)
                     ovs_list_remove(&path_i->list_node);
                     continue;
                 }
-
-                /* third step: remove rules where output_port is used in other rules */
-                if (rule_outputs_to_port(rule_i, path_i->out_port->ofp_port)) {
-                    ovs_list_remove(&path_i->list_node);
-                    continue;
-                }
             }
         }
 
