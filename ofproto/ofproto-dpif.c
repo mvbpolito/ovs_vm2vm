@@ -3372,7 +3372,7 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
 
     in_port = get_masked_input_port(rule);
 
-    if(in_port == 0)
+    if(in_port == OFPP_CONTROLLER || in_port == OFPP_LOCAL)
         return false;    /* XXX: Actually some rare thing happens here */
 
     const struct rule_actions * rule_actions = rule->actions;
@@ -3381,8 +3381,18 @@ get_path_from_rule(struct rule * rule, struct u_path * path)
         return false;
 
     out_port = ofpact_get_output_port(&rule_actions->ofpacts[0]);
-    if(out_port == OFPP_NONE || out_port == 0)  /* XXX: is 0 correct? */
+
+    /* is the output port valid for optimization? */
+    switch (out_port) {
+        case OFPP_IN_PORT:
+        case OFPP_TABLE:
+        case OFPP_NORMAL:
+        case OFPP_FLOOD:
+        case OFPP_ALL:
+        case OFPP_CONTROLLER:
+        case OFPP_LOCAL:
         return false;
+    }
 
     if(path != NULL)
     {
