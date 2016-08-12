@@ -2301,14 +2301,14 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
     err = request_remove_slave(dev1->up.name, dev1->up.name);
     if (err) {
         VLOG_ERR("Error removing device: '%s'", dev1->up.name);
-        goto error_unlock;
+        goto error_exit;
     }
 
     /* remove second slave device */
     err = request_remove_slave(dev2->up.name, dev2->up.name);
     if (err) {
         VLOG_ERR("Error removing device: '%s'", dev2->up.name);
-        goto error_unlock;
+        goto error_exit;
     }
 
     /* tell the guest to send the cap on the normal channel */
@@ -2336,13 +2336,13 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
             err = unplug_device(dev1->up.name, port_name);
             if (err) {
                 VLOG_ERR("Error unplugging device: '%s'", port_name);
-                goto error_unlock;
+                goto error_exit;
             }
 
             err = rte_ivshmem_metadata_remove(port_name);
             if (err) {
                 VLOG_ERR("Error removing metadata: '%s'", port_name);
-                goto error_unlock;
+                goto error_exit;
             }
 
             snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
@@ -2350,13 +2350,13 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
             err = unplug_device(dev2->up.name, port_name);
             if (err) {
                 VLOG_ERR("Error unplugging device: '%s'", port_name);
-                goto error_unlock;
+                goto error_exit;
             }
 
             err = rte_ivshmem_metadata_remove(port_name);
             if (err) {
                 VLOG_ERR("Error removing metadata: '%s'", port_name);
-                goto error_unlock;
+                goto error_exit;
             }
 
             direct_link = dpdk_ring1->direct;
@@ -2400,7 +2400,7 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
 
 error_unlock:
     ovs_mutex_unlock(&dpdk_mutex);
-    //return err;
+error_exit:
     return NULL;
 }
 
