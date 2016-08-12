@@ -3391,6 +3391,7 @@ get_path_from_rule(struct rule *rule, struct u_path *path)
         case OFPP_ALL:
         case OFPP_CONTROLLER:
         case OFPP_LOCAL:
+        case OFPP_NONE:
         return false;
     }
 
