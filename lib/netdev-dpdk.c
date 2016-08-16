@@ -325,8 +325,10 @@ struct dpdk_tx_queue {
 static struct ovs_list dpdk_ring_list OVS_GUARDED_BY(dpdk_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_ring_list);
 
+/* it should be a union */
 struct dpdkr_direct_link {
     struct rte_ring *rings[2];  /* rte_rings that communicates both VMs */
+    struct vf_info *vf_info;    /* vf_info that is being used */
 };
 
 struct dpdk_direct_link {
@@ -340,7 +342,7 @@ struct dpdk_ring {
     unsigned int user_port_id; /* User given port no, parsed from port name */
     int eth_port_id; /* ethernet device port id */
     struct pmd_internals *internals; /* pmd_internals structure on the guest */
-    struct dpdkr_direct_link * direct;  /* if set, the port is direct */
+    struct dpdkr_direct_link *direct;  /* if set, the port is direct */
     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
 };
 
@@ -1773,6 +1775,9 @@ int netdev_dpdk_get_bypass_stats(const struct netdev *netdev,
 
     ring = look_dpdkr_for_port_id(dev->port_id);
 
+    if (!ring)
+        return -1;
+
     ovs_mutex_lock(&dev->mutex);
 
     struct pmd_internals *internal = ring->internals;
@@ -2414,6 +2419,7 @@ netdev_dpdk_delete_direct_dpdk_link_thread(void *args_)
     struct netdev_dpdk *dpdkr_ = netdev_dpdk_cast(args.dev2);
     struct dpdk_ring *dpdkr;
     struct dpdk_direct_link *direct_link;
+    struct dpdkr_direct_link *dpdkr_direct_link;
     struct vf_info *vf_info = NULL;
     char port_name[RTE_ETH_NAME_MAX_LEN];
     int i, err;
@@ -2505,25 +2511,21 @@ netdev_dpdk_delete_direct_dpdk_link_thread(void *args_)
     //    args.callback(args.args);
     //}
     //
-    //struct netdev_stats stats;
+    struct netdev_stats stats;
 
     /* update the local counters with the packets sent using the direct link */
-    //netdev_dpdk_get_bypass_stats(&dpdkr_->up, &stats);
-    //
-    //dpdkr_->stats.rx_packets += stats.rx_packets;
-    //dpdkr_->stats.tx_packets += stats.tx_packets;
-    ////dev1->stats.rx_bytes += stats.rx_bytes;
-    ////dev1->stats.tx_bytes += stats.tx_bytes;
-    //dpdkr_->stats.tx_errors += stats.tx_errors;
+    netdev_dpdk_get_bypass_stats(&dpdkr_->up, &stats);
 
-    /* XXX: how are statistics supposed to work in this case? */
+    dpdkr_->stats.rx_packets += stats.rx_packets;
+    dpdkr_->stats.tx_packets += stats.tx_packets;
+    //dpdkr_->stats.rx_bytes += stats.rx_bytes;
+    //dpdkr_->stats.tx_bytes += stats.tx_bytes;
+    dpdkr_->stats.tx_errors += stats.tx_errors;
 
-    //netdev_dpdk_get_bypass_stats(&dpdk->up, &stats);
-    //
-    //dpdk->stats.rx_packets += stats.rx_packets;
-    //dpdk->stats.tx_packets += stats.tx_packets;
-    ////dev2->stats.rx_bytes += stats.rx_bytes;
-    ////dev2->stats.tx_bytes += stats.tx_bytes;
+    dpdk->stats.rx_packets += stats.tx_packets;
+    dpdk->stats.tx_packets += stats.rx_packets;
+    //dev2->stats.rx_bytes += stats.tx_bytes;
+    //dev2->stats.tx_bytes += stats.rx_bytes;
     //dpdk->stats.tx_errors += stats.tx_errors;
 
     return NULL;
@@ -2656,6 +2658,7 @@ netdev_dpdk_create_direct_dpdkr_link_thread(void *args_)
 
     direct_link->rings[0] = ring_1_2;
     direct_link->rings[1] = ring_2_1;
+    direct_link->vf_info = NULL;
 
     /* create first ivshmem with a ring pmd inside */
 
@@ -2773,6 +2776,7 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     struct netdev_dpdk *dpdkr_ = netdev_dpdk_cast(args.dev2);
     struct dpdk_ring *dpdkr;
     struct dpdk_direct_link *direct_link;
+    struct dpdkr_direct_link *dpdkr_direct_link;
     struct vf_info *vf_info = NULL;
     int err;
     char pci_addr[30];
@@ -2799,12 +2803,6 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
 
     VLOG_INFO("Creating direct dpdkr link %s <-> %s\n",
                 dpdk->up.name, dpdkr_->up.name);
-
-    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
-    direct_link->ring = dpdkr;
-
-    dpdk->direct = direct_link;
-    dpdkr->direct = 0xFFFFF;    /* XXX: OMG!!!! */
 
     snprintf(port_name, sizeof(port_name), DIRECT_PORT_NAME_FORMAT,
                 dpdk->port_id, dpdkr_->port_id);
@@ -2868,6 +2866,16 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     dpdkr->internals->rx_ring_queues[0].state = BYPASS_RX;
 
     vf_info->available = false;
+
+    direct_link = dpdk_rte_mzalloc(sizeof(*direct_link));
+    direct_link->ring = dpdkr;
+
+    dpdk->direct = direct_link;
+
+    dpdkr_direct_link = dpdk_rte_mzalloc(sizeof(*dpdkr_direct_link));
+    dpdkr_direct_link->vf_info = vf_info;
+
+    dpdkr->direct = dpdkr_direct_link;
 
     ovs_mutex_unlock(&dpdk_mutex);
 
