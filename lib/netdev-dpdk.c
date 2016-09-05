@@ -2720,6 +2720,8 @@ netdev_dpdk_create_direct_dpdkr_link_thread(void *args_)
         goto error_unlock;
     }
 
+    usleep(10000);
+
     /* add slaves */
     strcpy(dpdk_ring1->internals->bypass_dev, pci_addr1);
     err = request_add_slave(dev1->up.name, dev1->up.name, pci_addr1);
@@ -2734,6 +2736,8 @@ netdev_dpdk_create_direct_dpdkr_link_thread(void *args_)
         VLOG_ERR("Error requesting changing ports");
         goto error_unlock;
     }
+
+    usleep(200000);
 
     /* tell the guest to send the cap on the normal channel */
     dpdk_ring1->internals->tx_ring_queues[0].state = CREATION_TX;
