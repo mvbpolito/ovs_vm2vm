@@ -2316,7 +2316,15 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
         goto error_exit;
     }
 
-    /* tell the guest to send the cap on the normal channel */
+    /* tell the guest to wait for the cap on the bypass channel */
+    dpdk_ring1->internals->tx_ring_queues[0].state = DESTRUCTION_RX;
+    dpdk_ring2->internals->tx_ring_queues[0].state = DESTRUCTION_RX;
+
+    /* Once again:
+     *  Memory barrier? Delay?
+     */
+
+    /* tell the guest to send the cap on the bypass channel */
     dpdk_ring1->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
     dpdk_ring2->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
 
@@ -2470,7 +2478,8 @@ netdev_dpdk_delete_direct_dpdk_link_thread(void *args_)
         goto error_unlock;
     }
 
-    /* tell the guest to send the cap on the normal channel */
+    /* tell the guest to receive the cap on the normal channel */
+    dpdkr->internals->tx_ring_queues[0].state = DESTRUCTION_RX;
     dpdkr->internals->tx_ring_queues[0].state = DESTRUCTION_TX;
 
     /* give some time for the apps to send the last packets over the bypass */
@@ -2735,9 +2744,27 @@ netdev_dpdk_create_direct_dpdkr_link_thread(void *args_)
         goto error_unlock;
     }
 
+    /* tell the guest to look for the cap on the normal channel */
+    dpdk_ring1->internals->rx_ring_queues[0].state = CREATION_RX;
+    dpdk_ring2->internals->rx_ring_queues[0].state = CREATION_RX;
+
+    /* is a memory barrier necessary here?
+     * If yes, is it enough? Is it also necessary a delay?
+     * if the TX state is changed before the RX state the cap packet
+     * could be lost. It will end up in the application.
+     */
+
     /* tell the guest to send the cap on the normal channel */
     dpdk_ring1->internals->tx_ring_queues[0].state = CREATION_TX;
     dpdk_ring2->internals->tx_ring_queues[0].state = CREATION_TX;
+
+
+    /* this delay is a bad idea, it only should be used in the case it was not
+     * possible to add the bypass channel (i.e, the guest application is not
+     * running).
+     * XXX: it is also true that how the cap is send in the guest should be
+     * analysed, just to avoid sending a cap when not body is waiting for it
+     */
 
     /* give some time for the apps to send the last packets over the normal
      * channel */
@@ -2849,7 +2876,7 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
 
     if (!bypass_ready) {
         VLOG_ERR("Bypass device for '%s' is not ready", port_name);
-        goto error_unlock;
+        //goto error_unlock;
     }
 
     err = rte_eth_set_default_pool(dpdk->port_id, vf_info->vf_id);
@@ -2858,8 +2885,13 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
         goto error_unlock;
     }
 
-    /* tell the guest to send the cap on the normal channel */
-    dpdkr->internals->tx_ring_queues[0].state = CREATION_TX;
+    /* tell to the guest to wait for a cap packet.
+     * In this case there is not cap packet and the guest will switch to the
+     * bypass state after the timeout
+     */
+    dpdkr->internals->rx_ring_queues[0].state = CREATION_RX;
+
+    usleep(100*1000);    /* 100 ms */
 
     /* just in case the app have not set the state */
     dpdkr->internals->tx_ring_queues[0].state = BYPASS_TX;
@@ -2878,6 +2910,13 @@ netdev_dpdk_create_direct_dpdk_link_thread(void *args_)
     dpdkr->direct = dpdkr_direct_link;
 
     ovs_mutex_unlock(&dpdk_mutex);
+
+    /*
+     * It is not possible to reconfigure the port because the default pool is
+     * cleared when that is done.
+     * There is not a clear idea of how to implement it in a good way
+     *  - extend dpdk?
+     */
 
     //dpdk->requested_n_rxq = 0;
     //netdev_request_reconfigure(&dpdk->up);
