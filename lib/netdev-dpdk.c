@@ -2317,8 +2317,8 @@ netdev_dpdk_delete_direct_dpdkr_link_thread(void *args_)
     }
 
     /* tell the guest to wait for the cap on the bypass channel */
-    dpdk_ring1->internals->tx_ring_queues[0].state = DESTRUCTION_RX;
-    dpdk_ring2->internals->tx_ring_queues[0].state = DESTRUCTION_RX;
+    dpdk_ring1->internals->rx_ring_queues[0].state = DESTRUCTION_RX;
+    dpdk_ring2->internals->rx_ring_queues[0].state = DESTRUCTION_RX;
 
     /* Once again:
      *  Memory barrier? Delay?
