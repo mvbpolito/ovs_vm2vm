@@ -2553,7 +2553,10 @@ netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
     pthread_attr_t attr;
 
     struct direct_args *args = malloc(sizeof(*args));
-
+    args->dev1 = dev1_;
+    args->dev2 = dev2_;
+    args->callback = callback;
+    args->args = fargs;
     /*
      * before creating a thread to do all the work it is good to check that the
      * path can be optmized
@@ -2567,22 +2570,17 @@ netdev_dpdk_delete_direct_link(struct netdev *dev1_, struct netdev *dev2_,
 
     if (dev1_->netdev_class == dpdkr_class &&
         dev2_->netdev_class == dpdkr_class) {
-        args->dev1 = dev1_;
-        args->dev2 = dev2_;
+
         pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdkr_link_thread,
                     (void *)args);
     }
     else if (dev1_->netdev_class == dpdkr_class &&
              dev2_->netdev_class == dpdk_class) {
-        args->dev1 = dev2_;
-        args->dev2 = dev1_;
         pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdk_link_thread,
                     (void *)args);
     }
     else if (dev1_->netdev_class == dpdk_class &&
              dev2_->netdev_class == dpdkr_class) {
-        args->dev1 = dev1_;
-        args->dev2 = dev2_;
         pthread_create(&tid, &attr, netdev_dpdk_delete_direct_dpdk_link_thread,
                     (void *)args);
     }
